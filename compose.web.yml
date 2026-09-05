@@ -1,0 +1,56 @@
+# Use with docker-compose.yml: -f docker-compose.yml -f compose.web.yml
+x-workspace: &workspace
+  build: .
+  user: "${CVEX_UID:-1000}:${CVEX_GID:-1000}"
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+  environment: &workspace-env
+    CVEX_DATABASE_URL: "postgresql+psycopg://cvex:${POSTGRES_PASSWORD:?}@postgres:5432/cvex"
+    CVEX_WORKSPACE_ROOT: /var/lib/cvex/workspace
+    CVEX_ENCRYPTION_KEY: "${CVEX_ENCRYPTION_KEY:?Set CVEX_ENCRYPTION_KEY in .web.env}"
+    CVEX_COOKIE_SECURE: "true"
+    CVEX_WORKSPACE_ENABLED: "true"
+  volumes:
+    - ./data/cache:/var/lib/cvex/cache
+    - ./data/workspace:/var/lib/cvex/workspace
+    - ./reports:/app/reports
+    - ./config:/app/config:ro
+
+services:
+  postgres:
+    restart: unless-stopped
+  web:
+    <<: *workspace
+    command: [web]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+  scheduler:
+    <<: *workspace
+    command: [workspace-worker, scheduler]
+  report-worker:
+    <<: *workspace
+    command: [workspace-worker, report-worker]
+  cve-worker:
+    environment:
+      <<: *workspace-env
+  nvd-worker:
+    environment:
+      <<: *workspace-env
+  gateway:
+    image: caddy:2
+    environment:
+      CVEX_WEB_HOST: "${CVEX_WEB_HOST:-cvex.staging.ast.local}"
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    ports:
+      - "${CVEX_HTTPS_PORT:-8443}:443"
+    volumes:
+      - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./data/caddy:/data

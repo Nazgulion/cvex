@@ -1,0 +1,68 @@
+services:
+  postgres:
+    image: postgres:16
+    user: "${CVEX_UID:-1000}:${CVEX_GID:-1000}"
+    environment:
+      POSTGRES_DB: cvex
+      POSTGRES_USER: cvex
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cvex -d cvex"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  cvex:
+    build: .
+    user: "${CVEX_UID:-1000}:${CVEX_GID:-1000}"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      CVEX_DATABASE_URL: "postgresql+psycopg://cvex:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/cvex"
+      NVD_API_KEY: "${NVD_API_KEY:-}"
+    volumes:
+      - ./data/cache:/var/lib/cvex/cache
+      - ./data/status:/var/lib/cvex/status
+      - ./reports:/app/reports
+      - ./config:/app/config:ro
+      - ./sbom.spdx_AST_test.json:/app/sbom.spdx_AST_test.json:ro
+    command: ["status"]
+
+  cve-worker:
+    build: .
+    user: "${CVEX_UID:-1000}:${CVEX_GID:-1000}"
+    profiles: ["workers"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      CVEX_DATABASE_URL: "postgresql+psycopg://cvex:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/cvex"
+      NVD_API_KEY: "${NVD_API_KEY:-}"
+    volumes:
+      - ./data/cache:/var/lib/cvex/cache
+      - ./data/status:/var/lib/cvex/status
+      - ./reports:/app/reports
+      - ./config:/app/config:ro
+    command: ["worker", "cve-sync"]
+
+  nvd-worker:
+    build: .
+    user: "${CVEX_UID:-1000}:${CVEX_GID:-1000}"
+    profiles: ["workers"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    environment:
+      CVEX_DATABASE_URL: "postgresql+psycopg://cvex:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/cvex"
+      NVD_API_KEY: "${NVD_API_KEY:-}"
+    volumes:
+      - ./data/cache:/var/lib/cvex/cache
+      - ./data/status:/var/lib/cvex/status
+      - ./reports:/app/reports
+      - ./config:/app/config:ro
+    command: ["worker", "nvd-sync"]

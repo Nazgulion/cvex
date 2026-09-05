@@ -1,0 +1,128 @@
+database:
+  url: postgresql+psycopg://cvex:cvex_dev@postgres:5432/cvex
+
+logging:
+  level: DEBUG
+  format: plain
+
+history:
+  lookback_years: 10
+  start_date: null
+
+sync:
+  incremental_overlap: 15m
+
+paths:
+  cache_root: /var/lib/cvex/cache
+  status_root: /var/lib/cvex/status
+  report_root: reports
+
+retention:
+  source_payloads: latest_only
+  report_exports: indefinite
+  cache_files: indefinite
+
+processing:
+  source_chunk_size: 1000
+
+workers:
+  source_concurrency: 2
+
+disk:
+  warn_free_percent_below: 15
+  warn_free_bytes_below: 10737418240
+  critical_free_percent_below: 5
+  critical_free_bytes_below: 2147483648
+
+network:
+  ca_bundle: null
+
+attribution:
+  nvd: "This product uses the NVD API but is not endorsed or certified by the NVD."
+  cve: "CVE data is provided by the CVE Program."
+
+identity_aliases:
+  github.com/tensorflow/tensorflow:
+    cpe_vendor: google
+    cpe_product: tensorflow
+  github.com/leethomason/tinyxml2:
+    cpe_vendor: tinyxml2_project
+    cpe_product: tinyxml2
+
+version_overrides:
+  - component_name: libxml2
+    raw_version: e7c3a4ca1be916d84e8182fb5de3a9c7a27bfe11
+    version: 2.11.0
+    source: resolved-from-AOSP-source
+  - component_name: freetype
+    raw_version: 0b62c1e43dc4b0e3c50662aac757e4f7321e5466
+    version: 2.12.1
+    source: resolved-from-AOSP-source
+  - component_name: libjpeg-turbo
+    raw_version: ad8b3b0f84baf155f3bde5626c3bf9d20535bcae
+    version: 2.1.0
+    source: resolved-from-AOSP-source
+  - component_name: skia
+    raw_version: f24059cf165ab84fd46f4caa6df72d0ec55393a4
+    version: "112"
+    source: resolved-from-AOSP-source
+  - component_name: zlib
+    raw_version: fa5dc4750029333c2486efa38eec7d13890108ed
+    version: 1.2.13
+    source: resolved-from-AOSP-source
+  - component_name: f2fs-tools
+    raw_version: 06c027abc6153c4a97cba5317844e8dcaaee3cf7
+    version: 1.16.0
+    source: resolved-from-AOSP-source
+  - component_name: libbpf
+    raw_version: 9fab7c81ecd462ce6aa1eabd24b230f0fc6a14c7
+    version: "0.7"
+    source: resolved-from-AOSP-source
+  - component_name: libopus
+    raw_version: 8cf872a186b96085b1bb3a547afd598354ebeb87
+    version: 1.3.1
+    source: resolved-from-AOSP-source
+  - component_name: toybox
+    raw_version: d45ee3a2bc6271110312f01be867a9b6b91dd07f
+    version: 0.8.9
+    source: resolved-from-AOSP-source
+  - component_name: gptfdisk
+    raw_version: cb4bf320748f701a0ed835d4a410f2960f1ce0bd
+    version: 1.0.9.2
+    source: resolved-from-AOSP-source
+  - component_name: libyuv
+    raw_version: d53f1beecdd8d959f7a3f2e19bd0bd7e7227a233
+    version: "1837"
+    source: resolved-from-AOSP-source
+  - component_name: one-true-awk
+    raw_version: 5e49ea4d1f71d9134734011f2151cae4dbec5e5f
+    version: "20221215"
+    source: resolved-from-AOSP-source
+
+sources:
+  cve:
+    enabled: true
+    git_url: https://github.com/CVEProject/cvelistV5.git
+    git_ref: main
+    sync_interval: 30m
+    freshness_sla: 2h
+    retry_window: 60m
+    initial_retry_delay: 30s
+    max_retry_delay: 10m
+    request_timeout: 120s
+    cache_dir: /var/lib/cvex/cache/cve
+
+  nvd:
+    enabled: true
+    api_url: https://services.nvd.nist.gov/rest/json/cves/2.0
+    feed_base_url: https://nvd.nist.gov/feeds/json/cve/2.0
+    sync_interval: 2h
+    freshness_sla: 8h
+    retry_window: 90m
+    initial_retry_delay: 60s
+    max_retry_delay: 20m
+    request_timeout: 120s
+    no_key_request_pause: 10s
+    api_key_request_pause: 2s
+    api_key: null
+    cache_dir: /var/lib/cvex/cache/nvd

@@ -1,0 +1,15 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: cvex
+      POSTGRES_PASSWORD: workspace-test-only
+      POSTGRES_DB: cvex
+    ports:
+      - "127.0.0.1:55439:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U cvex -d cvex"]
+      interval: 2s
+      retries: 20
