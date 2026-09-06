@@ -23,6 +23,12 @@ services:
     restart: unless-stopped
   web:
     <<: *workspace
+    environment:
+      <<: *workspace-env
+      FORWARDED_ALLOW_IPS: "${CVEX_TRUSTED_PROXY_IP:-172.30.254.2}"
+    networks:
+      - default
+      - proxy
     command: [web]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
@@ -43,6 +49,9 @@ services:
       <<: *workspace-env
   gateway:
     image: caddy:2
+    networks:
+      proxy:
+        ipv4_address: "${CVEX_TRUSTED_PROXY_IP:-172.30.254.2}"
     environment:
       CVEX_WEB_HOST: "${CVEX_WEB_HOST:-cvex.staging.ast.local}"
     restart: unless-stopped
@@ -54,3 +63,9 @@ services:
     volumes:
       - ./config/Caddyfile:/etc/caddy/Caddyfile:ro
       - ./data/caddy:/data
+
+networks:
+  proxy:
+    ipam:
+      config:
+        - subnet: "${CVEX_PROXY_SUBNET:-172.30.254.0/28}"

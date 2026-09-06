@@ -58,42 +58,15 @@ def run_match(
     components = session.execute(
         select(SbomComponent).where(SbomComponent.sbom_document_id == sbom_id).order_by(SbomComponent.name)
     ).scalars().all()
+    errors = 0
     for index, component in enumerate(components):
         if progress:
             progress(index, len(components))
         try:
-            findings = _match_component(session, scan.id, component, selected_sources)
-            if findings:
-                _add_component_result(
-                    session,
-                    scan.id,
-                    component.id,
-                    "matched",
-                    "matched_vulnerabilities",
-                    f"{len(findings)} CVE candidate(s) matched this component.",
-                    _collect_component_warnings(findings),
-                )
-            elif component.version_status != "usable" and not _component_cpe_identities(component):
-                _add_component_result(
-                    session,
-                    scan.id,
-                    component.id,
-                    "not_assessed",
-                    component.version_reason or "missing_or_unusable_version",
-                    "Component has no usable version or security identity for matching.",
-                    [],
-                )
-            else:
-                _add_component_result(
-                    session,
-                    scan.id,
-                    component.id,
-                    "unmatched",
-                    "no_known_cve",
-                    "No CVE candidates matched this component.",
-                    [],
-                )
+            with session.begin_nested():
+                _assess_component(session, scan.id, component, selected_sources)
         except Exception as exc:  # keep one component from stopping the scan
+            errors += 1
             _add_component_result(
                 session,
                 scan.id,
@@ -104,9 +77,9 @@ def run_match(
                 [{"code": "matcher_error", "message": str(exc)}],
             )
 
-    scan.status = "succeeded"
+    scan.status = "partial" if errors else "succeeded"
     scan.finished_at = utcnow()
-    run.status = "succeeded"
+    run.status = scan.status
     run.finished_at = utcnow()
     if progress:
         progress(len(components), len(components))
@@ -115,6 +88,20 @@ def run_match(
     else:
         session.flush()
     return str(scan.id)
+
+
+def _assess_component(session, scan_id, component, selected_sources):
+    findings = _match_component(session, scan_id, component, selected_sources)
+    if findings:
+        _add_component_result(session, scan_id, component.id, "matched", "matched_vulnerabilities",
+                              f"{len(findings)} CVE candidate(s) matched this component.", _collect_component_warnings(findings))
+    elif component.version_status != "usable" and not _component_cpe_identities(component):
+        _add_component_result(session, scan_id, component.id, "not_assessed",
+                              component.version_reason or "missing_or_unusable_version",
+                              "Component has no usable version or security identity for matching.", [])
+    else:
+        _add_component_result(session, scan_id, component.id, "unmatched", "no_known_cve",
+                              "No CVE candidates matched this component.", [])
 
 
 def _match_component(session: Session, scan_id: str, component: SbomComponent, sources: list[str]) -> list[VulnerabilityFinding]:

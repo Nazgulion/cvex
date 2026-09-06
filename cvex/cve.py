@@ -12,8 +12,10 @@ from cvex.config import CvexConfig
 from cvex.db.models import ConnectorState, SourceRun
 from cvex.ingest import MaterializedRecord, batches, fail_source_run, finish_source_run, materialize_batch
 from cvex.util import duration_seconds, parse_dt
+from cvex.source_lock import exclusive_source
 
 
+@exclusive_source("cve")
 def ingest_cve_incremental(session: Session, config: CvexConfig, limit: int | None = None) -> tuple[str, int, str | None, str]:
     years = configured_history_years(config)
     repo_path = sync_cve_repo(config, years=years)
@@ -25,6 +27,7 @@ def ingest_cve_incremental(session: Session, config: CvexConfig, limit: int | No
     return run_id, count, previous, latest_sha
 
 
+@exclusive_source("cve")
 def backfill_cve_year(session: Session, config: CvexConfig, year: int, limit: int | None = None, *, repo_path: Path | None = None, commit_sha: str | None = None) -> tuple[str, int, str]:
     repo_path = repo_path or sync_cve_repo(config, years=[year])
     latest_sha = commit_sha or git_output(repo_path, "rev-parse", "HEAD")

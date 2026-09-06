@@ -52,7 +52,15 @@ Scheduled time is enqueue time. The initial deployment runs one report at a time
 
 Reports run with local data even if sources are stale. Their captured source freshness is shown with the result. Each report's database snapshot and exported content are frozen; future synchronization does not alter it.
 
-The newest 30 successful runs per project are retained across all versions. Cleanup removes old managed report directories and detailed scan results, preserving uploads and source intelligence. Failed jobs do not displace successful reports. Explicitly adopted report copies join this policy; original pre-adoption report files remain as archival copies. Synthetic on-fly SBOMs/reports are not adopted.
+The newest 30 published runs per project are retained across all versions, including reports marked `partial` when some components could not be assessed. Cleanup removes old managed report directories and detailed scan results, preserving uploads and source intelligence. Failed jobs do not displace published reports: after retries are exhausted their scan/snapshot data and temporary artifacts are removed, while the failure metadata stays visible. File deletion uses a durable database outbox so filesystem failures can be retried without rolling back publication state. Explicitly adopted report copies join this policy; original pre-adoption report files remain as archival copies. Synthetic on-fly SBOMs/reports are not adopted.
+
+## Upgrading to the review-hardening release
+
+Back up the database and workspace first. Stop the running web, scheduler, report and source workers before applying migration `0003_review_hardening`, then rebuild and restart them together. This migration preserves existing frozen payloads in `report_snapshot` and removes their duplicate column from `report_job`; it is **not compatible with the previous web worker image**. To restore that image, stop services and downgrade to `0002_workspace` first (or restore the pre-upgrade backup).
+
+The gateway now has a dedicated proxy network. The web service trusts only `CVEX_TRUSTED_PROXY_IP` (default `172.30.254.2`) for forwarded client addresses. `CVEX_PROXY_SUBNET` defaults to `172.30.254.0/28`; change both together if that subnet conflicts with your environment. Do not publish the web service's port 8000 directly. Successful logins reset that client's attempt counter.
+
+CLI synchronization/backfills and scheduled workers share per-source locks. If a source is already running, a CLI invocation reports that it is busy; retry after it finishes. Different sources remain independently executable. NVD recovers old checkpoints through consecutive windows of at most 120 days, saving each completed window; limited runs do not advance checkpoints. Older timestamped payloads cannot replace newer stored data.
 
 ## Configuration and recovery
 
@@ -64,7 +72,7 @@ Report workers use PostgreSQL advisory locks and durable job states. Interrupted
 
 The browser updates telemetry every three seconds. Source batch counts measure committed CVEs, while report progress counts SBOM components. A missing heartbeat is displayed as stale rather than as active processing. No percentage is displayed for source downloads whose total is not known.
 
-For rollback, stop the web scheduler, executor, gateway, and web-enabled source workers. Restart the prior application image with the base Compose configuration. The additive workspace tables can remain in place; no schema downgrade is needed. Preserve the database backup until acceptance.
+For rollback to the original CLI-only v2 runtime, stop the web scheduler, executor, gateway, and web-enabled source workers and restart the prior CLI image with the base Compose configuration. The workspace tables can remain. Rollback to an older **web** image requires the schema procedure above. Preserve the database backup until acceptance.
 
 ## Development and verification
 

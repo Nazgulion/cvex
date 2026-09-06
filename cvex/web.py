@@ -41,7 +41,7 @@ def database():
         yield db
 
 
-def identity(request: Request, db=Depends(database)):
+def identity(request: Request, db=Depends(database, scope="function")):
     token = request.cookies.get("cvex_session", "")
     user = query(db, """SELECT u.id,u.username,u.role,s.csrf FROM cvex.web_session s
       JOIN cvex.web_user u ON u.id=s.user_id WHERE token_hash=:h AND expires_at>now()""",
@@ -127,6 +127,7 @@ def login(body: Login, request: Request, db=Depends(database)):
     query(db, "INSERT INTO cvex.web_session VALUES(:h,:u,:c,:e)",
           h=hashlib.sha256(token.encode()).hexdigest(), u=user["id"], c=csrf, e=utcnow()+timedelta(hours=12))
     audit(db, body.username, "login")
+    query(db, "DELETE FROM cvex.login_attempt WHERE address=:a", a=address)
     db.commit()
     response = JSONResponse({"username": user["username"], "role": user["role"], "csrf": csrf})
     response.set_cookie("cvex_session", token, httponly=True, secure=os.getenv("CVEX_COOKIE_SECURE", "true") == "true", samesite="strict", max_age=43200)
@@ -269,7 +270,7 @@ def run_now(project_id: UUID, user=Depends(identity), db=Depends(database)):
 
 @app.get("/api/v1/runs/{job_id}/artifacts/{kind}")
 def artifact(job_id: UUID, kind: str, download: bool = False, user=Depends(identity), db=Depends(database)):
-    record = query(db, "SELECT artifacts FROM cvex.report_job WHERE id=:id AND state='succeeded'", id=job_id).scalar()
+    record = query(db, "SELECT artifacts FROM cvex.report_job WHERE id=:id AND state IN ('succeeded','partial')", id=job_id).scalar()
     if not record or kind not in record:
         raise HTTPException(404, "Report artifact not available")
     path = safe_path(record[kind])

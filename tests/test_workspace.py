@@ -85,7 +85,7 @@ def test_workspace_api_execution_and_retention(tmp_path, monkeypatch):
     with factory() as db:
         interrupted=query(db,"SELECT * FROM cvex.report_job WHERE id=:id",id=jid).mappings().one()
         assert interrupted["state"]=="queued"
-        assert interrupted["frozen_payload"] is not None
+        assert query(db,"SELECT payload FROM cvex.report_snapshot WHERE job_id=:id",id=jid).scalar() is not None
         original_scan=interrupted["scan_id"]
         query(db,"UPDATE cvex.report_job SET available_at=now() WHERE id=:id",id=jid)
         db.commit()
@@ -126,9 +126,57 @@ def test_workspace_api_execution_and_retention(tmp_path, monkeypatch):
         for i in range(30):
             query(db,"INSERT INTO cvex.report_job(project_id,version_id,trigger,state,finished_at) VALUES(:p,:v,'manual','succeeded',now())",p=pid,v=version)
         db.commit()
+    original_query = jobs.query
+    def fail_cleanup(db, sql, **params):
+        if "DELETE FROM cvex.report_snapshot" in sql:
+            raise RuntimeError("simulated cleanup rollback")
+        return original_query(db, sql, **params)
+    monkeypatch.setattr(jobs, "query", fail_cleanup)
+    with pytest.raises(RuntimeError, match="cleanup rollback"):
+        cleanup_reports(factory)
+    assert client.get(f"/api/v1/runs/{jid}/artifacts/html").status_code == 200
+    monkeypatch.setattr(jobs, "query", original_query)
+    original_rmtree = jobs.shutil.rmtree
+    def fail_delete(*args, **kwargs):
+        raise OSError("simulated unavailable filesystem")
+    monkeypatch.setattr(jobs.shutil, "rmtree", fail_delete)
     cleanup_reports(factory)
+    with factory() as db:
+        assert query(db, "SELECT count(*) FROM cvex.artifact_cleanup").scalar() > 0
+    monkeypatch.setattr(jobs.shutil, "rmtree", original_rmtree)
+    cleanup_reports(factory)
+    with factory() as db:
+        assert query(db, "SELECT count(*) FROM cvex.artifact_cleanup").scalar() == 0
     assert client.get(f"/api/v1/runs/{jid}/artifacts/html").status_code==404
     assert client.get(f"/api/v1/projects/{pid}").json()["versions"]
+    with factory() as db:
+        query(db, "UPDATE cvex.report_job SET state='failed' WHERE project_id=:p AND state='queued'", p=pid)
+        db.commit()
+    failed_id = client.post(f"/api/v1/projects/{pid}/runs").json()["id"]
+    monkeypatch.setattr(jobs, "_render_findings_html", broken_export)
+    for attempt in range(3):
+        with factory() as db:
+            query(db, "UPDATE cvex.report_job SET available_at=now() WHERE id=:id", id=failed_id)
+            db.commit()
+        report_tick(factory, config)
+    monkeypatch.setattr(jobs, "_render_findings_html", render)
+    with factory() as db:
+        failed = query(db, "SELECT * FROM cvex.report_job WHERE id=:id", id=failed_id).mappings().one()
+        assert failed["state"] == "failed" and failed["scan_id"] is None and failed["finished_at"] is not None
+        assert query(db, "SELECT count(*) FROM cvex.report_snapshot WHERE job_id=:id", id=failed_id).scalar() == 0
+    assert not (tmp_path / f"projects/{pid}/reports/{failed_id}.pending").exists()
+    # Partial scans remain downloadable and visibly disclose incomplete assessment.
+    import cvex.matcher as matcher
+    def broken_component(*args):
+        raise ValueError("simulated component failure")
+    monkeypatch.setattr(matcher, "_match_component", broken_component)
+    partial_id = client.post(f"/api/v1/projects/{pid}/runs").json()["id"]
+    report_tick(factory, config)
+    with factory() as db:
+        assert query(db, "SELECT state FROM cvex.report_job WHERE id=:id", id=partial_id).scalar() == "partial"
+        assert query(db, "SELECT count(*) FROM cvex.report_snapshot WHERE job_id=:id", id=partial_id).scalar() == 1
+    partial_html = client.get(f"/api/v1/runs/{partial_id}/artifacts/html")
+    assert partial_html.status_code == 200 and "Partial scan" in partial_html.text
     # Ordinary internal users may operate projects but not change schedules or keys.
     ordinary="user-"+uuid4().hex[:8]
     assert client.post('/api/v1/users',json={"username":ordinary,"password":"workspace test password","role":"user"}).status_code==201

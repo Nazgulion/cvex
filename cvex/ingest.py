@@ -152,6 +152,8 @@ def materialize_batch(session: Session, records: list[MaterializedRecord], run_i
                 payload = EXCLUDED.payload,
                 run_id = EXCLUDED.run_id
               WHERE cvex.source_payload.sha256 IS DISTINCT FROM EXCLUDED.sha256
+                AND (cvex.source_payload.source_modified IS NULL
+                     OR EXCLUDED.source_modified >= cvex.source_payload.source_modified)
               RETURNING source, cve_id
             )
             INSERT INTO changed_stage (source, cve_id) SELECT source, cve_id FROM upserted

@@ -46,6 +46,10 @@ def test_direct_load_idempotency_child_replacement_and_precedence():
         assert session.scalar(select(func.count()).select_from(VulnerabilitySeverity).where(VulnerabilitySeverity.cve_id == TEST_CVE_ID)) == 1
         assert session.scalar(select(func.count()).select_from(AffectedCpe).where(AffectedCpe.cve_id == TEST_CVE_ID)) == 1
         assert session.scalar(select(AffectedCpe.cpe_product).where(AffectedCpe.cve_id == TEST_CVE_ID)) == "new-product"
+        stale = _load(session, "nvd", _nvd(9.0, "obsolete-product", "2099-01-02T00:00:00Z"))
+        assert stale.changed == 0
+        assert session.scalar(select(AffectedCpe.cpe_product).where(AffectedCpe.cve_id == TEST_CVE_ID)) == "new-product"
+        assert session.scalar(select(VulnerabilitySeverity.score).where(VulnerabilitySeverity.cve_id == TEST_CVE_ID)) == 5.0
 
         cve = parse_cve_record({
             "cveMetadata": {"cveId": TEST_CVE_ID, "state": "REJECTED", "dateRejected": "2099-01-04T00:00:00Z"},

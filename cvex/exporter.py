@@ -421,7 +421,17 @@ def build_findings_payload(
     for finding in findings:
         finding["decision"] = _build_match_decision(finding)
         finding["matched"]["warnings"] = _compact_warnings(finding["matched"]["warnings"])
+    assessment_errors = [
+        {"component": component.name, "message": result.reason_message}
+        for result, component in session.execute(
+            select(ScanComponentResult, SbomComponent)
+            .join(SbomComponent, SbomComponent.id == ScanComponentResult.component_id)
+            .where(ScanComponentResult.scan_id == scan.id, ScanComponentResult.status == "error")
+            .order_by(SbomComponent.name)
+        ).all()
+    ]
     return {
+        "assessment_errors": assessment_errors,
         "metadata": {
             "scan_id": str(scan.id),
             "export_run_id": export_run_id,
@@ -784,6 +794,12 @@ def _render_findings_html(payload: dict[str, Any]) -> str:
     rows = "\n".join(_render_component_row(group) for group in component_groups)
     if not rows:
         rows = '<tr><td colspan="7" class="empty">No findings.</td></tr>'
+    errors = payload.get("assessment_errors", [])
+    error_banner = (
+        '<div class="warning"><strong>Partial scan: some components could not be assessed.</strong><ul>'
+        + ''.join(f'<li>{_e(row["component"])}: {_e(row["message"])}</li>' for row in errors)
+        + '</ul></div>'
+    ) if errors else ''
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -975,6 +991,7 @@ def _render_findings_html(payload: dict[str, Any]) -> str:
       </div>
       <div class="muted">Generated {_e(metadata["generated_at"])}</div>
     </div>
+    {error_banner}
     <div class="meta">
       {_meta_item("Client", metadata["client"])}
       {_meta_item("Product", metadata["product"])}

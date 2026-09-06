@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import threading
 import time
@@ -16,6 +17,8 @@ from cvex.matcher import run_match
 from cvex.time import utcnow
 from cvex.workspace import audit, enqueue, next_occurrence, query, rows, safe_path, storage, telemetry
 
+logger = logging.getLogger(__name__)
+
 
 @contextmanager
 def heartbeat(factory, name, state, details=None):
@@ -28,8 +31,8 @@ def heartbeat(factory, name, state, details=None):
                     if details and details.get("job_id"):
                         query(db, "UPDATE cvex.report_job SET heartbeat_at=now() WHERE id=:id", id=details["job_id"])
                     db.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.warning("Heartbeat failed for %s (%s)", name, type(exc).__name__)
             stop.wait(3)
     thread = threading.Thread(target=beat, daemon=True)
     thread.start()
@@ -61,13 +64,17 @@ def cleanup_reports(factory):
             return
         old = rows(db, """SELECT * FROM (SELECT id,project_id,scan_id,artifacts,
           row_number() OVER(PARTITION BY project_id ORDER BY finished_at DESC,id DESC) position
-          FROM cvex.report_job WHERE state='succeeded') ranked WHERE position>30""")
+          FROM cvex.report_job WHERE state IN ('succeeded','partial')) ranked WHERE position>30
+          UNION ALL SELECT j.id,j.project_id,COALESCE(j.scan_id,s.scan_id),j.artifacts,0
+          FROM cvex.report_job j LEFT JOIN cvex.report_snapshot s ON s.job_id=j.id
+          WHERE j.state='failed' AND (j.scan_id IS NOT NULL OR s.job_id IS NOT NULL OR j.finished_at IS NULL)""")
         for job in old:
-            # Only this job's immutable directory can be removed. Failures roll back DB cleanup and retry.
-            directory = safe_path(f"projects/{job['project_id']}/reports/{job['id']}")
-            if directory.exists():
-                shutil.rmtree(directory)
-            query(db, "UPDATE cvex.report_job SET state='expired',artifacts=NULL,frozen_payload=NULL,scan_id=NULL WHERE id=:id", id=job["id"])
+            # Persist deletion intent before touching files. Rollback leaves reports intact.
+            relative = f"projects/{job['project_id']}/reports/{job['id']}"
+            for path in (relative, relative + ".pending"):
+                query(db, "INSERT INTO cvex.artifact_cleanup(path) VALUES(:p) ON CONFLICT DO NOTHING", p=path)
+            query(db, """UPDATE cvex.report_job SET state=CASE WHEN state='failed' THEN state ELSE 'expired' END,
+              artifacts=NULL,scan_id=NULL,finished_at=COALESCE(finished_at,now()) WHERE id=:id""", id=job["id"])
             query(db, "DELETE FROM cvex.report_snapshot WHERE job_id=:id", id=job["id"])
             if job["scan_id"]:
                 sid = job["scan_id"]
@@ -77,6 +84,22 @@ def cleanup_reports(factory):
                         query(db, f"DELETE FROM cvex.{table} WHERE scan_id=:s", s=sid)
                     query(db, "DELETE FROM cvex.scan WHERE id=:s", s=sid)
             audit(db, "retention", "report_expired", job_id=job["id"], project_id=job["project_id"])
+        db.commit()
+    drain_artifact_cleanup(factory)
+
+
+def drain_artifact_cleanup(factory):
+    with factory() as db:
+        pending = rows(db, "SELECT path FROM cvex.artifact_cleanup FOR UPDATE SKIP LOCKED")
+        for item in pending:
+            try:
+                directory = safe_path(item["path"])
+                if directory.exists():
+                    shutil.rmtree(directory)
+            except OSError as exc:
+                logger.warning("Artifact cleanup deferred (%s)", type(exc).__name__)
+                continue
+            query(db, "DELETE FROM cvex.artifact_cleanup WHERE path=:p", p=item["path"])
         db.commit()
 
 
@@ -98,14 +121,16 @@ def _report_tick(factory, config):
         query(db, """UPDATE cvex.report_job SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,
           error='Worker interrupted; recovering durable job',available_at=now()
           WHERE state IN ('scanning','exporting')""")
-        query(db, """UPDATE cvex.report_job j SET frozen_payload=s.payload,scan_id=s.scan_id
-          FROM cvex.report_snapshot s WHERE s.job_id=j.id AND j.state='queued' AND j.frozen_payload IS NULL""")
-        job = query(db, "SELECT * FROM cvex.report_job WHERE state='queued' AND available_at<=now() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1").mappings().first()
+        job = query(db, """SELECT j.*,s.payload frozen_payload,s.scan_id snapshot_scan_id
+          FROM cvex.report_job j LEFT JOIN cvex.report_snapshot s ON s.job_id=j.id
+          WHERE j.state='queued' AND j.available_at<=now() ORDER BY j.created_at
+          FOR UPDATE OF j SKIP LOCKED LIMIT 1""").mappings().first()
         if not job:
             telemetry(db, "report-worker", "idle", phase="Waiting for report jobs")
             db.commit()
             return
         job = dict(job)
+        job["scan_id"] = job["snapshot_scan_id"] or job["scan_id"]
         query(db, "UPDATE cvex.report_job SET state='scanning',started_at=COALESCE(started_at,now()),heartbeat_at=now(),attempts=attempts+1 WHERE id=:id", id=job["id"])
         db.commit()
     details = {"job_id": str(job["id"]), "project_id": str(job["project_id"]), "phase": "scanning"}
@@ -131,7 +156,7 @@ def _report_tick(factory, config):
                     product = Product(client_name=version["company"], product_name=version["name"], release_version=version["label"])
                     findings = build_findings_payload(db, config, scan, sbom, product, str(job["id"]))
                     summary = build_summary_payload(db, config, scan, sbom, product, str(job["id"]))
-                    frozen = {"findings": findings, "summary": summary}
+                    frozen = {"findings": findings, "summary": summary, "scan_status": scan.status}
                     # Commit the snapshot and frozen payload together, without updating the separately heartbeating job row.
                     query(db, "INSERT INTO cvex.report_snapshot(job_id,scan_id,payload) VALUES(:j,:s,CAST(:p AS jsonb))", j=job["id"], s=sid, p=json.dumps(frozen))
                     db.commit()
@@ -140,7 +165,7 @@ def _report_tick(factory, config):
             details["phase"] = "exporting"
             frozen = job["frozen_payload"]
             with factory() as db:
-                query(db, "UPDATE cvex.report_job SET state='exporting',scan_id=:s,frozen_payload=CAST(:p AS jsonb) WHERE id=:id", s=job["scan_id"], p=json.dumps(frozen), id=job["id"])
+                query(db, "UPDATE cvex.report_job SET state='exporting',scan_id=:s WHERE id=:id", s=job["scan_id"], id=job["id"])
                 db.commit()
             relative = f"projects/{job['project_id']}/reports/{job['id']}"
             directory = safe_path(relative)
@@ -157,7 +182,10 @@ def _report_tick(factory, config):
             artifacts = {"html": relative+"/findings.html", "csv": relative+"/findings.csv", "json": relative+"/findings.json", "summary": relative+"/scan-summary.json"}
             brief = {"counts": frozen["summary"].get("counts", {}), "source_freshness": frozen["summary"].get("source_freshness", {})}
             with factory() as db:
-                query(db, "UPDATE cvex.report_job SET state='succeeded',finished_at=now(),error=NULL,summary=CAST(:s AS jsonb),artifacts=CAST(:a AS jsonb) WHERE id=:id", s=json.dumps(brief), a=json.dumps(artifacts), id=job["id"])
+                query(db, "UPDATE cvex.report_job SET state=:state,finished_at=now(),error=:error,summary=CAST(:s AS jsonb),artifacts=CAST(:a AS jsonb) WHERE id=:id",
+                      state="partial" if frozen.get("scan_status") == "partial" else "succeeded",
+                      error="Some components could not be assessed; see report errors" if frozen.get("scan_status") == "partial" else None,
+                      s=json.dumps(brief), a=json.dumps(artifacts), id=job["id"])
                 audit(db, "report-worker", "report_published", project_id=job["project_id"], job_id=job["id"])
                 db.commit()
     except Exception as exc:
@@ -165,7 +193,6 @@ def _report_tick(factory, config):
             # Snapshot is durable even if the process failed before attaching it to the job.
             query(db, """UPDATE cvex.report_job SET state=CASE WHEN attempts>=3 THEN 'failed' ELSE 'queued' END,
               error=:e,available_at=now()+interval '30 seconds'*attempts,
-              frozen_payload=COALESCE(frozen_payload,(SELECT payload FROM cvex.report_snapshot WHERE job_id=:id)),
               scan_id=COALESCE(scan_id,(SELECT scan_id FROM cvex.report_snapshot WHERE job_id=:id)) WHERE id=:id""", id=job["id"], e=f"{type(exc).__name__}: {exc}"[:1000])
             audit(db, "report-worker", "report_attempt_failed", job_id=job["id"])
             db.commit()

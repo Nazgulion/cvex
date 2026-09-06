@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from contextlib import ExitStack
 from typing import Optional
 
 import typer
@@ -18,6 +19,7 @@ from cvex.nvd import backfill_nvd_year, ingest_nvd_incremental, ingest_nvd_sync_
 from cvex.onfly import run_onfly_scan
 from cvex.sbom import export_sbom_archive, import_sbom_archive, import_spdx
 from cvex.time import utcnow
+from cvex.source_lock import source_lock
 from cvex.workers import cve_sync_cycle, nvd_sync_cycle, run_worker_loop
 
 app = typer.Typer(no_args_is_help=True)
@@ -75,8 +77,17 @@ def backfill(source: str = typer.Option("all", "--source", help="cve|nvd|all"), 
     failures = []
     backfill_started = utcnow()
     latest_cve_sha = None
+    leases = ExitStack()
+    completed = False
     try:
         sources = _selected_sources(config, source)
+        for name in list(sources):
+            try:
+                leases.enter_context(source_lock(session.get_bind(), name))
+            except RuntimeError as exc:
+                sources.remove(name)
+                failures.append(f"{name}:locked")
+                typer.echo(str(exc), err=True)
         current = datetime.now(timezone.utc).year
         years = [year] if year is not None else list(range(start_year or current - config.history.lookback_years + 1, (end_year or current) + 1))
         cve_repo = None
@@ -104,18 +115,22 @@ def backfill(source: str = typer.Option("all", "--source", help="cve|nvd|all"), 
                 except Exception as exc:
                     failures.append(f"nvd:{selected_year}")
                     typer.echo(f"nvd: year={selected_year} failed: {type(exc).__name__}: {exc}", err=True)
+        completed = True
     finally:
-        if limit is None and latest_cve_sha and not any(item.startswith("cve:") for item in failures):
-            state = session.get(ConnectorState, "cve")
-            state.checkpoint_type = "git_commit_sha"
-            state.checkpoint_value = latest_cve_sha
-            session.commit()
-        if limit is None and "nvd" in locals().get("sources", []) and not any(item.startswith("nvd:") for item in failures):
-            state = session.get(ConnectorState, "nvd")
-            state.checkpoint_type = "last_modified_timestamp"
-            state.checkpoint_value = backfill_started.isoformat(timespec="seconds").replace("+00:00", "Z")
-            session.commit()
-        session.close()
+        try:
+            if completed and limit is None and latest_cve_sha and not any(item.startswith("cve:") for item in failures):
+                state = session.get(ConnectorState, "cve")
+                state.checkpoint_type = "git_commit_sha"
+                state.checkpoint_value = latest_cve_sha
+                session.commit()
+            if completed and limit is None and "nvd" in locals().get("sources", []) and not any(item.startswith("nvd:") for item in failures):
+                state = session.get(ConnectorState, "nvd")
+                state.checkpoint_type = "last_modified_timestamp"
+                state.checkpoint_value = backfill_started.isoformat(timespec="seconds").replace("+00:00", "Z")
+                session.commit()
+        finally:
+            session.close()
+            leases.close()
     if failures:
         raise typer.Exit(1)
 

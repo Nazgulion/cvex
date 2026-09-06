@@ -15,6 +15,7 @@ from cvex.cpe import parse_cpe
 from cvex.db.models import ConnectorState, SourceRun
 from cvex.ingest import CpeRecord, MaterializedRecord, SeverityRecord, batches, fail_source_run, finish_source_run, materialize_batch
 from cvex.time import utcnow
+from cvex.source_lock import exclusive_source
 from cvex.util import duration_seconds, parse_dt
 
 NVD_MAX_WINDOW = timedelta(days=120)
@@ -112,22 +113,32 @@ def ingest_nvd_records(session: Session, config: CvexConfig, records: Iterable[d
         raise
 
 
+@exclusive_source("nvd")
 def ingest_nvd_sync_window(session: Session, config: CvexConfig, start_date: str | None = None, end_date: str | None = None, cve_id: str | None = None, keyword: str | None = None, cpe_name: str | None = None, limit: int | None = None, date_mode: str = "published") -> tuple[str, int]:
     return ingest_nvd_records(session, config, iter_nvd_api_records(config, start_date, end_date, cve_id, keyword, cpe_name, limit, date_mode), mode=f"{date_mode}_api")
 
 
+@exclusive_source("nvd")
 def ingest_nvd_incremental(session: Session, config: CvexConfig, limit: int | None = None) -> tuple[str, int, str, str]:
     now = utcnow()
     state = session.get(ConnectorState, "nvd")
     checkpoint = _parse_checkpoint(state.checkpoint_value if state else None) or now - NVD_MAX_WINDOW
     overlap = timedelta(seconds=duration_seconds(config.sync.incremental_overlap))
-    start = max(checkpoint - overlap, now - NVD_MAX_WINDOW)
-    start_s, end_s = _nvd_time(start), _nvd_time(now)
-    run_id, count = ingest_nvd_sync_window(session, config, start_s, end_s, limit=limit, date_mode="modified")
-    finish_source_run(session, run_id, "nvd", config, {"window_start": start_s, "window_end": end_s, "partial": limit is not None}, "last_modified_timestamp" if limit is None else None, end_s if limit is None else None)
-    return run_id, count, start_s, end_s
+    start = min(checkpoint - overlap, now)
+    first_start = _nvd_time(start)
+    total = 0
+    while True:
+        end = min(start + NVD_MAX_WINDOW, now)
+        start_s, end_s = _nvd_time(start), _nvd_time(end)
+        run_id, count = ingest_nvd_sync_window(session, config, start_s, end_s, limit=limit, date_mode="modified")
+        total += count
+        finish_source_run(session, run_id, "nvd", config, {"window_start": start_s, "window_end": end_s, "partial": limit is not None}, "last_modified_timestamp" if limit is None else None, end_s if limit is None else None)
+        if end >= now or limit is not None:
+            return run_id, total, first_start, end_s
+        start = end
 
 
+@exclusive_source("nvd")
 def backfill_nvd_year(session: Session, config: CvexConfig, year: int, limit: int | None = None) -> tuple[str, int]:
     source = config.sources["nvd"]
     url = f"{source.feed_base_url.rstrip('/')}/nvdcve-2.0-{year}.json.gz"
