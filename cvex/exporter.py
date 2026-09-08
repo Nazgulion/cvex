@@ -506,6 +506,18 @@ def _append_unique(values: list[str], value: str | None) -> None:
         values.append(value)
 
 
+def _csv_cell(value):
+    # CSV quoting does not stop spreadsheets interpreting untrusted text as formulas.
+    if isinstance(value, str) and value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+class _SafeCsvWriter(csv.DictWriter):
+    def writerow(self, rowdict):
+        return super().writerow({key: _csv_cell(value) for key, value in rowdict.items()})
+
+
 def _write_findings_csv(path: Path, findings: list[dict[str, Any]]) -> None:
     columns = [
         "component_name",
@@ -539,7 +551,7 @@ def _write_findings_csv(path: Path, findings: list[dict[str, Any]]) -> None:
         "sources",
     ]
     with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=columns)
+        writer = _SafeCsvWriter(fh, fieldnames=columns)
         writer.writeheader()
         for row in findings:
             component = row["component"]
@@ -604,7 +616,7 @@ def _write_onfly_csv(path: Path, results: list[dict[str, Any]]) -> None:
         "warnings",
     ]
     with path.open("w", encoding="utf-8", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=columns)
+        writer = _SafeCsvWriter(fh, fieldnames=columns)
         writer.writeheader()
         for row in results:
             component = row["component"]

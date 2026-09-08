@@ -27,8 +27,9 @@ services:
       <<: *workspace-env
       FORWARDED_ALLOW_IPS: "${CVEX_TRUSTED_PROXY_IP:-172.30.254.2}"
     networks:
-      - default
-      - proxy
+      default: {}
+      proxy:
+        ipv4_address: "${CVEX_WEB_PROXY_IP:-172.30.254.3}"
     command: [web]
     healthcheck:
       test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]

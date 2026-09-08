@@ -23,6 +23,9 @@ export async function api<T = unknown>(
     body: body === undefined ? undefined : form ? body : JSON.stringify(body),
   });
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/auth/")) {
+      window.dispatchEvent(new Event("cvex:session-expired"));
+    }
     const error = await response
       .json()
       .catch(() => ({ detail: response.statusText }));

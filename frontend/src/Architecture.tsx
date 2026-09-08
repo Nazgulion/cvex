@@ -7,12 +7,15 @@ import {
   type Edge,
 } from "@xyflow/react";
 import type { Status } from "./types";
+import "@xyflow/react/dist/style.css";
 export function Architecture({
   status,
   onSelect,
+  theme,
 }: {
   status: Status | null;
   onSelect: (s: string) => void;
+  theme: "light" | "dark";
 }) {
   const worker = (name: string) =>
     status?.workers?.find((w) => w.name === name);
@@ -82,9 +85,7 @@ export function Architecture({
         nodesDraggable={false}
         nodesConnectable={false}
         onNodeClick={(_, n) => onSelect(n.id.replace("-upstream", ""))}
-        colorMode={
-          document.documentElement.dataset.theme === "light" ? "light" : "dark"
-        }
+        colorMode={theme}
       >
         <Background color="#35404b" gap={24} />
         <Controls showInteractive={false} />

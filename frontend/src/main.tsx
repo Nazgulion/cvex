@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { lazy, Suspense, useEffect, useState, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Shield,
@@ -22,17 +22,24 @@ import {
   Radio,
   Check,
   X,
+  FileCheck2,
+  LoaderCircle,
 } from "lucide-react";
-import "@xyflow/react/dist/style.css";
 import "./style.css";
 
 import { api, setCsrf } from "./api";
 import { Badge, Empty, Field, Stat, Severity, when, bytes } from "./ui";
-import { Architecture } from "./Architecture";
+import { useVisibility } from "./useVisibility";
+import { SyncHistory } from "./SyncHistory";
+import { Dialog } from "./Dialog";
+const Architecture = lazy(() =>
+  import("./Architecture").then((module) => ({ default: module.Architecture })),
+);
 import { SettingsPanel } from "./SettingsPanel";
 import type { User, Project, ProjectDetail, Status, AuditEvent } from "./types";
 
 function App() {
+  const visible = useVisibility();
   const [user, setUser] = useState<User | null>(null),
     [loading, setLoading] = useState(true),
     [page, setPage] = useState("projects"),
@@ -62,8 +69,21 @@ function App() {
     setSelected(null);
     setProject(null);
     setStatus(null);
+    setPage("projects");
+    setCreate(false);
+    setActivity([]);
+    setUsers([]);
   };
   const refreshRequest = useRef<AbortController | null>(null);
+  const actionInFlight = useRef(false);
+  useEffect(() => {
+    const expired = () => {
+      clearSession();
+      setError("Your session expired. Please sign in again.");
+    };
+    window.addEventListener("cvex:session-expired", expired);
+    return () => window.removeEventListener("cvex:session-expired", expired);
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     localStorage.setItem("cvex-theme", theme);
@@ -105,16 +125,27 @@ function App() {
   };
   useEffect(() => {
     setProject(null);
-    if (!user) return;
-    refresh().catch((e) => setError(e.message));
-    const id = setInterval(() => refresh().catch(() => {}), 5000);
+    if (!user || !visible) return;
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      try {
+        await refresh();
+      } catch (e) {
+        if (!stopped) setError((e as Error).message);
+      }
+      if (!stopped && page === "projects") timer = setTimeout(poll, 5000);
+    };
+    void poll();
     return () => {
-      clearInterval(id);
+      stopped = true;
+      clearTimeout(timer);
       refreshRequest.current?.abort();
     };
-  }, [user, selected]);
+  }, [user, selected, page, visible]);
   useEffect(() => {
-    if (!user || user.role !== "admin") return;
+    if (!user || user.role !== "admin" || page !== "architecture" || !visible)
+      return;
     const controller = new AbortController();
     let live = false;
     const acceptStatus = (value: Status) => {
@@ -154,7 +185,7 @@ function App() {
       controller.abort();
       clearInterval(id);
     };
-  }, [user]);
+  }, [user, page, visible]);
   useEffect(() => {
     if (!user) return;
     if (page === "activity")
@@ -167,6 +198,8 @@ function App() {
         .catch((e) => setError(e.message));
   }, [page, user]);
   const act = async (action: () => Promise<unknown>, message = "Saved") => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
     setError("");
     setBusy(true);
     try {
@@ -176,6 +209,7 @@ function App() {
     } catch (e) {
       setError((e as Error).message);
     } finally {
+      actionInFlight.current = false;
       setBusy(false);
     }
   };
@@ -183,10 +217,18 @@ function App() {
     setSettingsTarget(target);
     setPage("settings");
   };
+  const activeVersion = project?.versions.find(
+    (version) => version.id === project.active_version_id,
+  );
+  const filteredProjects = projects.filter((p) =>
+    `${p.company} ${p.name} ${p.filename || ""}`
+      .toLowerCase()
+      .includes(search.trim().toLowerCase()),
+  );
   if (loading)
     return (
       <div className="splash">
-        <Shield />
+        <Shield className="loading-mark" />
         Loading workspace…
       </div>
     );
@@ -224,6 +266,9 @@ function App() {
           className="login-card"
           onSubmit={async (e) => {
             e.preventDefault();
+            if (actionInFlight.current) return;
+            actionInFlight.current = true;
+            setBusy(true);
             const f = new FormData(e.currentTarget);
             try {
               const u = await api<User>(
@@ -236,6 +281,9 @@ function App() {
               setError("");
             } catch (e) {
               setError((e as Error).message);
+            } finally {
+              actionInFlight.current = false;
+              setBusy(false);
             }
           }}
         >
@@ -254,7 +302,7 @@ function App() {
             />
           </Field>
           {error && <div className="alert">{error}</div>}
-          <button className="primary">
+          <button className="primary" disabled={busy}>
             Sign in <ArrowUpRight size={16} />
           </button>
           <small>Accounts are provisioned by your administrator.</small>
@@ -285,6 +333,7 @@ function App() {
             <button
               key={String(key)}
               className={page === key ? "active" : ""}
+              aria-current={page === key ? "page" : undefined}
               onClick={() => {
                 setPage(String(key));
                 setError("");
@@ -346,7 +395,7 @@ function App() {
               : page[0].toUpperCase() + page.slice(1)}
           </span>
           <div>
-            <span className="environment">STAGING</span>
+            <span className="environment">INTERNAL WORKSPACE</span>
             <Clock size={14} />
             {new Date().toLocaleDateString(undefined, {
               month: "short",
@@ -365,7 +414,7 @@ function App() {
             </div>
           )}
           {notice && (
-            <div className="notice">
+            <div className="notice" role="status">
               <Check size={16} />
               {notice}
               <button
@@ -378,11 +427,15 @@ function App() {
           )}
           {page === "projects" && !selected && (
             <>
-              <div className="page-heading">
+              <div className="page-heading projects-hero">
                 <div>
-                  <span className="eyebrow">YOUR SOFTWARE, IN FOCUS</span>
+                  <span className="eyebrow">
+                    <span className="signal-dot" /> YOUR SOFTWARE, IN FOCUS
+                  </span>
                   <h1>
-                    Projects<span className="heading-dot">.</span>
+                    Your software.
+                    <br />
+                    <span className="hero-accent">A clearer picture.</span>
                   </h1>
                   <p>
                     A living view of your software inventory and vulnerability
@@ -408,7 +461,7 @@ function App() {
                 <Stat
                   title="REPORT RETENTION"
                   value="30"
-                  detail="Successful reports per project"
+                  detail="Published reports per project"
                 />
               </div>
               <div className="section-bar">
@@ -424,41 +477,39 @@ function App() {
                 </div>
               </div>
               <div className="project-grid">
-                {projects
-                  .filter((p) =>
-                    (p.company + " " + p.name)
-                      .toLowerCase()
-                      .includes(search.toLowerCase()),
-                  )
-                  .map((p) => (
-                    <button
-                      className="project-card"
-                      key={p.id}
-                      onClick={() => setSelected(p.id)}
-                    >
-                      <div className="card-top">
-                        <div className="folder-icon">
-                          <Folder size={23} />
-                        </div>
-                        <ArrowUpRight size={18} />
+                {filteredProjects.map((p) => (
+                  <button
+                    className="project-card"
+                    key={p.id}
+                    onClick={() => setSelected(p.id)}
+                  >
+                    <div className="card-top">
+                      <div className="folder-icon">
+                        <Folder size={23} />
                       </div>
-                      <small>{p.company}</small>
-                      <h2>{p.name}</h2>
-                      <p>
-                        {p.filename || "Upload your first SBOM to get started"}
-                      </p>
-                      <div className="card-meta">
-                        <Badge state={p.latest_state || "ready"} />
-                        <span>{p.active_version || "No active version"}</span>
-                      </div>
-                      <footer>
-                        <Clock size={13} />
-                        {p.schedule_enabled
-                          ? "Next " + when(p.next_run)
-                          : "Manual scans · schedule disabled"}
-                      </footer>
-                    </button>
-                  ))}
+                      <ArrowUpRight size={18} />
+                    </div>
+                    <small>{p.company}</small>
+                    <h2>{p.name}</h2>
+                    <p>
+                      {p.filename || "Upload your first SBOM to get started"}
+                    </p>
+                    <div className="card-meta">
+                      <Badge state={p.latest_state || "ready"} />
+                      <span>
+                        {p.active_version
+                          ? `Active · ${p.active_version}`
+                          : "No active version"}
+                      </span>
+                    </div>
+                    <footer>
+                      <Clock size={13} />
+                      {p.schedule_enabled
+                        ? "Next " + when(p.next_run)
+                        : "Manual scans · schedule disabled"}
+                    </footer>
+                  </button>
+                ))}
               </div>
               {projects.length === 0 && (
                 <Empty
@@ -466,7 +517,22 @@ function App() {
                   detail="Create a company workspace, upload an SBOM, and generate your first findings report."
                 />
               )}
+              {projects.length > 0 && filteredProjects.length === 0 && (
+                <Empty
+                  title="No matching projects"
+                  detail="Try a company name, project name or SBOM filename."
+                />
+              )}
             </>
+          )}
+          {page === "projects" && selected && project?.id !== selected && (
+            <div className="loading-panel" role="status">
+              <LoaderCircle className="spin" size={22} />
+              <span>Loading project…</span>
+              <button onClick={() => setSelected(null)}>
+                Back to projects
+              </button>
+            </div>
           )}
           {page === "projects" && selected && project?.id === selected && (
             <>
@@ -513,10 +579,28 @@ function App() {
                   </button>
                 </div>
               </div>
+              <section
+                className="active-sbom"
+                aria-label="Selected SBOM for scanning"
+              >
+                <div className="active-sbom-icon">
+                  <FileCheck2 size={26} />
+                </div>
+                <div className="active-sbom-copy">
+                  <span className="eyebrow">SELECTED FOR NEW SCANS</span>
+                  <h2>{activeVersion?.filename || "No SBOM selected"}</h2>
+                  <p>
+                    {activeVersion
+                      ? `Version ${activeVersion.label} · Manual and scheduled scans use this file.`
+                      : "Upload your first SPDX JSON file to start scanning."}
+                  </p>
+                </div>
+                {activeVersion && <Badge state="active" />}
+              </section>
               <div className="inventory">
                 <div>
                   <span className="eyebrow">SBOM VERSIONS</span>
-                  <h3>Your report’s source of truth</h3>
+                  <h3>Keep your inventory current</h3>
                   <p>
                     New runs use the active version. Historical reports keep
                     their original version.
@@ -549,6 +633,9 @@ function App() {
                     placeholder="Version label, e.g. 2.4.0"
                     required
                   />
+                  <small className="upload-hint">
+                    A label for this software release, not an API key.
+                  </small>
                   <input
                     aria-label="SPDX JSON file"
                     name="file"
@@ -564,7 +651,14 @@ function App() {
               </div>
               <div className="versions">
                 {project.versions.map((v) => (
-                  <div key={v.id}>
+                  <div
+                    key={v.id}
+                    className={
+                      v.id === project.active_version_id
+                        ? "version-selected"
+                        : ""
+                    }
+                  >
                     <div>
                       <strong>{v.label}</strong>
                       <small>
@@ -598,7 +692,7 @@ function App() {
                   Recent scans{" "}
                   <span className="count">{project.jobs.length}</span>
                 </h2>
-                <small>Newest 30 successful reports retained</small>
+                <small>Newest 30 published reports retained</small>
               </div>
               <div className="table-wrap">
                 <table>
@@ -737,7 +831,21 @@ function App() {
                   detail={"of " + bytes(status?.disk_total_bytes)}
                 />
               </div>
-              <Architecture status={status} onSelect={openSettings} />
+              <Suspense
+                fallback={
+                  <div className="loading-panel" role="status">
+                    <LoaderCircle className="spin" />
+                    Loading architecture…
+                  </div>
+                }
+              >
+                <Architecture
+                  status={status}
+                  onSelect={openSettings}
+                  theme={theme === "light" ? "light" : "dark"}
+                />
+              </Suspense>
+              <SyncHistory status={status} />
               <div className="section-bar">
                 <h2>Report queue</h2>
                 <small>One active job per project</small>
@@ -997,7 +1105,7 @@ function App() {
         </div>
       </main>
       {create && (
-        <div className="modal-backdrop">
+        <Dialog onClose={() => setCreate(false)} busy={busy}>
           <form
             className="modal"
             onSubmit={(e) => {
@@ -1014,6 +1122,7 @@ function App() {
               type="button"
               className="close"
               aria-label="Close"
+              disabled={busy}
               onClick={() => setCreate(false)}
             >
               <X size={18} />
@@ -1021,12 +1130,13 @@ function App() {
             <div className="folder-icon">
               <Folder />
             </div>
-            <h2>Create a project</h2>
+            <h2 id="project-dialog-title">Create a project</h2>
             <p>A dedicated home for your SBOM versions and reports.</p>
             <Field label="Company">
               <input
                 name="company"
                 placeholder="Company name"
+                autoFocus
                 required
                 maxLength={200}
               />
@@ -1043,7 +1153,7 @@ function App() {
               Create project <ChevronRight size={16} />
             </button>
           </form>
-        </div>
+        </Dialog>
       )}
     </div>
   );

@@ -137,6 +137,13 @@ def materialize_batch(session: Session, records: list[MaterializedRecord], run_i
             ],
         )
 
+    # Serialize overlapping CVEs across otherwise independent source workers.
+    # The following upserts then read committed precedence data, including a
+    # CVE List update which was in flight when this batch started.
+    session.execute(text("""SELECT pg_advisory_xact_lock(lock_key) FROM (
+      SELECT DISTINCT hashtextextended('cve:' || cve_id, 0) lock_key
+      FROM payload_stage ORDER BY lock_key
+    ) ordered_keys"""))
     session.execute(
         text(
             """
@@ -212,13 +219,27 @@ def _merge_cve_vulnerabilities(session: Session) -> None:
         FROM payload_stage p JOIN changed_stage c USING (source, cve_id)
         ON CONFLICT (cve_id) DO UPDATE SET
           published = COALESCE(EXCLUDED.published, cvex.vulnerability.published),
-          modified = COALESCE(EXCLUDED.modified, cvex.vulnerability.modified),
+          modified = greatest(EXCLUDED.modified, cvex.vulnerability.modified),
           withdrawn = EXCLUDED.withdrawn,
           status = EXCLUDED.status,
-          description = COALESCE(EXCLUDED.description, cvex.vulnerability.description),
-          description_source = CASE WHEN EXCLUDED.description IS NULL THEN cvex.vulnerability.description_source ELSE 'cve' END,
+          description = EXCLUDED.description,
+          description_source = EXCLUDED.description_source,
           updated_at = now()
     """))
+    # A removed CVE description must not leave the old text behind. Fall back
+    # to the current NVD document, whether stored wrapped or unwrapped.
+    session.execute(text("""UPDATE cvex.vulnerability v SET description=f.description,
+      description_source=CASE WHEN f.description IS NULL THEN NULL ELSE 'nvd' END
+      FROM (
+        SELECT p.cve_id, (
+          SELECT item->>'value' FROM cvex.source_payload n,
+            jsonb_array_elements(COALESCE(NULLIF(n.payload->'cve'->'descriptions', 'null'::jsonb),
+              NULLIF(n.payload->'descriptions', 'null'::jsonb), '[]'::jsonb)) item
+          WHERE n.source='nvd' AND n.cve_id=p.cve_id AND item->>'lang'='en' LIMIT 1
+        ) description
+        FROM payload_stage p JOIN changed_stage c USING(source,cve_id)
+        WHERE p.description IS NULL
+      ) f WHERE v.cve_id=f.cve_id"""))
 
 
 def _merge_nvd_vulnerabilities(session: Session) -> None:
@@ -240,9 +261,9 @@ def _merge_nvd_vulnerabilities(session: Session) -> None:
             SELECT 1 FROM cvex.source_payload sp WHERE sp.source='cve' AND sp.cve_id=EXCLUDED.cve_id
           ) THEN cvex.vulnerability.status ELSE EXCLUDED.status END,
           description = CASE WHEN cvex.vulnerability.description_source='cve'
-            THEN cvex.vulnerability.description ELSE COALESCE(EXCLUDED.description, cvex.vulnerability.description) END,
+            THEN cvex.vulnerability.description ELSE EXCLUDED.description END,
           description_source = CASE WHEN cvex.vulnerability.description_source='cve' THEN 'cve'
-            WHEN EXCLUDED.description IS NOT NULL THEN 'nvd' ELSE cvex.vulnerability.description_source END,
+            WHEN EXCLUDED.description IS NOT NULL THEN 'nvd' ELSE NULL END,
           updated_at = now()
     """))
 

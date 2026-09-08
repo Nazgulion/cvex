@@ -66,6 +66,16 @@ export interface Source {
   next_retry_at: string | null;
 }
 export interface Status {
+  recent_syncs?: {
+    id: string;
+    source: string;
+    status: string;
+    started_at: string;
+    finished_at: string | null;
+    duration_seconds: number | null;
+    processed: string | null;
+    changed: string | null;
+  }[];
   database_bytes: number;
   disk_free_bytes: number;
   disk_total_bytes: number;

@@ -17,16 +17,32 @@ from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 from pydantic import BaseModel, Field
 from croniter import croniter
 
 from cvex.config import load_config
 from cvex.db.session import make_session_factory
 from cvex.sbom import import_spdx
+from cvex.spdx_validation import validate_spdx
 from cvex.time import utcnow
 from cvex.workspace import audit, cipher, enqueue, next_occurrence, password_hash, query, rows, safe_path, storage, verify_password
 
 app = FastAPI(title="CVEX Workspace", docs_url=None, redoc_url=None)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+
+
+@app.middleware("http")
+async def response_policy(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    if request.url.path.startswith("/api/"):
+        response.headers.setdefault("Cache-Control", "private, no-store")
+    elif request.url.path.startswith("/assets/") and response.status_code == 200:
+        response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    else:
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
 
 
 def factory():
@@ -195,10 +211,14 @@ def project_detail(project_id: UUID, user=Depends(identity), db=Depends(database
     if not result:
         raise HTTPException(404, "Project not found")
     return {**result, "versions": rows(db, "SELECT * FROM cvex.project_version WHERE project_id=:id ORDER BY created_at DESC", id=project_id),
-            "jobs": rows(db, """SELECT j.id,j.version_id,j.state,j.trigger,j.scheduled_at,j.created_at,j.started_at,j.finished_at,
+            "jobs": rows(db, """WITH visible AS (
+            (SELECT * FROM cvex.report_job WHERE project_id=:id AND state IN ('succeeded','partial') ORDER BY created_at DESC LIMIT 30)
+            UNION ALL
+            (SELECT * FROM cvex.report_job WHERE project_id=:id AND state NOT IN ('succeeded','partial','expired') ORDER BY created_at DESC LIMIT 70)
+            ) SELECT j.id,j.version_id,j.state,j.trigger,j.scheduled_at,j.created_at,j.started_at,j.finished_at,
             j.progress,j.total,j.summary,j.error,j.artifacts,v.label version_label
-            FROM cvex.report_job j JOIN cvex.project_version v ON v.id=j.version_id
-            WHERE j.project_id=:id AND j.state<>'expired' ORDER BY j.created_at DESC LIMIT 100""", id=project_id)}
+            FROM visible j JOIN cvex.project_version v ON v.id=j.version_id
+            ORDER BY j.created_at DESC""", id=project_id)}
 
 
 @app.post("/api/v1/projects/{project_id}/versions", status_code=201)
@@ -219,15 +239,10 @@ def upload(project_id: UUID, label: str = "", make_active: bool = False, file: U
                 output.write(chunk)
         try:
             payload = json.loads(path.read_bytes())
-            if not isinstance(payload, dict) or not str(payload.get("spdxVersion", "")).startswith("SPDX-") or not isinstance(payload.get("packages"), list) or not payload["packages"]:
-                raise ValueError("Expected SPDX JSON with spdxVersion and a non-empty packages array")
-            if any(not isinstance(p, dict) or not p.get("SPDXID") or not p.get("name") for p in payload["packages"]):
-                raise ValueError("Each SPDX package needs SPDXID and name")
+            validate_spdx(payload)
         except (ValueError, UnicodeError) as exc:
             raise HTTPException(422, str(exc))
-        sbom_id, count = import_spdx(db, path, project["company"], project["name"], label or file.filename or "upload")
-        # Import commits internally; reacquire the project lock before version publication.
-        query(db, "SELECT id FROM cvex.project WHERE id=:p FOR UPDATE", p=project_id)
+        sbom_id, count = import_spdx(db, path, project["company"], project["name"], label or file.filename or "upload", commit=False)
         existing = query(db, "SELECT id FROM cvex.project_version WHERE project_id=:p AND sbom_id=:s", p=project_id, s=sbom_id).scalar()
         if existing:
             path.unlink(missing_ok=True)
@@ -269,7 +284,7 @@ def run_now(project_id: UUID, user=Depends(identity), db=Depends(database)):
 
 
 @app.get("/api/v1/runs/{job_id}/artifacts/{kind}")
-def artifact(job_id: UUID, kind: str, download: bool = False, user=Depends(identity), db=Depends(database)):
+def artifact(job_id: UUID, kind: str, download: bool = False, user=Depends(identity), db=Depends(database, scope="function")):
     record = query(db, "SELECT artifacts FROM cvex.report_job WHERE id=:id AND state IN ('succeeded','partial')", id=job_id).scalar()
     if not record or kind not in record:
         raise HTTPException(404, "Report artifact not available")
@@ -361,6 +376,10 @@ def status_payload(db):
     root = storage()
     usage = shutil.disk_usage(root if root.exists() else root.parent)
     return {"workers": rows(db, "SELECT *,CASE WHEN name='storage' THEN heartbeat_at<now()-interval '90 seconds' ELSE heartbeat_at<now()-interval '15 seconds' END stale FROM cvex.worker_telemetry ORDER BY name"),
+            "recent_syncs": rows(db, """SELECT id,source,status,started_at,finished_at,
+              extract(epoch FROM finished_at-started_at) duration_seconds,
+              details->>'records_seen' processed,details->>'records_changed' changed
+              FROM cvex.source_run WHERE source IN ('nvd','cve') ORDER BY started_at DESC LIMIT 12"""),
             "sources": rows(db, "SELECT source,status,health,last_success,last_attempt,error_count,next_retry_at,CASE WHEN last_error IS NOT NULL THEN split_part(last_error, ':', 1) END error_type FROM cvex.connector_state ORDER BY source"),
             "schedules": rows(db, "SELECT target,enabled,next_run,version FROM cvex.web_schedule ORDER BY target"),
             "queue": rows(db, "SELECT state,count(*) count,min(created_at) oldest FROM cvex.report_job WHERE state IN ('queued','scanning','exporting') GROUP BY state"),

@@ -46,6 +46,8 @@ Keep `.web.env`, PostgreSQL, `data/workspace`, and Caddy's data in your backups.
 - “View HTML” opens a stored report in a separate tab. The download icon saves HTML; CSV and JSON links download those formats.
 - Admins use each project's Schedule button to enable five-field cron scheduling. Default timezone is Europe/Belgrade; schedules start paused.
 - Admins use Architecture to inspect live workers, queues, source status, and storage. Click a source node to open its schedule and credential settings.
+- Architecture → Source sync history shows the latest 12 ingestion runs, start/finish times, ingestion duration, processed records and combined added/updated records. CVE Git preparation is not included in this duration; missing counts are shown as a dash.
+- A project's “Selected for new scans” panel identifies its active SBOM filename and version. The version label describes your software release; it is not an API key.
 - NVD starts with a two-hour interval and CVE List with 30 minutes. Changes apply between cycles; a running cycle completes using its current settings.
 
 Scheduled time is enqueue time. The initial deployment runs one report at a time. Repeated manual requests reuse the existing queued/active job. Overlapping scheduled occurrences are logged as skipped. Restart recovery enqueues at most one catch-up job per schedule. DST gaps are skipped and repeated local times execute once.
@@ -58,7 +60,7 @@ The newest 30 published runs per project are retained across all versions, inclu
 
 Back up the database and workspace first. Stop the running web, scheduler, report and source workers before applying migration `0003_review_hardening`, then rebuild and restart them together. This migration preserves existing frozen payloads in `report_snapshot` and removes their duplicate column from `report_job`; it is **not compatible with the previous web worker image**. To restore that image, stop services and downgrade to `0002_workspace` first (or restore the pre-upgrade backup).
 
-The gateway now has a dedicated proxy network. The web service trusts only `CVEX_TRUSTED_PROXY_IP` (default `172.30.254.2`) for forwarded client addresses. `CVEX_PROXY_SUBNET` defaults to `172.30.254.0/28`; change both together if that subnet conflicts with your environment. Do not publish the web service's port 8000 directly. Successful logins reset that client's attempt counter.
+The gateway now has a dedicated proxy network. The web service trusts only `CVEX_TRUSTED_PROXY_IP` (default `172.30.254.2`) for forwarded client addresses. The web service has its own fixed `CVEX_WEB_PROXY_IP` (default `172.30.254.3`) so automatic address allocation cannot claim the gateway address during startup. `CVEX_PROXY_SUBNET` defaults to `172.30.254.0/28`; change all three together if that subnet conflicts with your environment. Do not publish the web service's port 8000 directly. Successful logins reset that client's attempt counter.
 
 CLI synchronization/backfills and scheduled workers share per-source locks. If a source is already running, a CLI invocation reports that it is busy; retry after it finishes. Different sources remain independently executable. NVD recovers old checkpoints through consecutive windows of at most 120 days, saving each completed window; limited runs do not advance checkpoints. Older timestamped payloads cannot replace newer stored data.
 
@@ -75,6 +77,10 @@ The browser updates telemetry every three seconds. Source batch counts measure c
 For rollback to the original CLI-only v2 runtime, stop the web scheduler, executor, gateway, and web-enabled source workers and restart the prior CLI image with the base Compose configuration. The workspace tables can remain. Rollback to an older **web** image requires the schema procedure above. Preserve the database backup until acceptance.
 
 ## Development and verification
+
+The UI-performance release adds migration `0004_workspace_indexes`; run `db-upgrade` before starting the rebuilt application. It adds indexes for project history, retention and recent source runs. It does not modify existing report content.
+
+The architecture module is lazy-loaded. Polling waits for each request to finish and pauses in hidden tabs; live metrics are connected only while Architecture is visible. Hashed build assets are cached immutably, HTML is revalidated, authenticated API responses are not cached, and responses are compressed (SSE is excluded). CSV downloads prefix formula-like text with an apostrophe for spreadsheet safety; JSON retains the original values.
 
 ```bash
 uv sync --extra dev

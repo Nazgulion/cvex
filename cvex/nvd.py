@@ -55,8 +55,10 @@ def iter_nvd_api_records(config: CvexConfig, start_date: str | None = None, end_
             emitted += 1
             yield wrapper
         total = int(payload.get("totalResults", emitted))
-        params["startIndex"] += int(payload.get("resultsPerPage", len(page) or 2000))
-        if params["startIndex"] >= total or not page:
+        if not page and params["startIndex"] < total:
+            raise RuntimeError("NVD returned an empty page before the end of the requested window")
+        params["startIndex"] += len(page)
+        if params["startIndex"] >= total:
             return
         time.sleep(duration_seconds(pause or "10s"))
 

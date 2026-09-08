@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from cvex.db.models import (
@@ -26,10 +26,14 @@ def import_spdx(
     client: str | None = None,
     product_name: str | None = None,
     release: str | None = None,
+    *,
+    commit: bool = True,
 ) -> tuple[str, int]:
     sbom_path = Path(path)
     data = json.loads(sbom_path.read_text(encoding="utf-8"))
     content_hash = sha256_bytes(sbom_path.read_bytes())
+    # Serialize identical uploads across projects until their entire import commits.
+    session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": "sbom:" + content_hash})
     existing = session.execute(select(SbomDocument).where(SbomDocument.content_sha256 == content_hash)).scalar_one_or_none()
     if existing:
         component_count = session.execute(
@@ -87,7 +91,10 @@ def import_spdx(
 
     run.status = "succeeded"
     run.finished_at = utcnow()
-    session.commit()
+    if commit:
+        session.commit()
+    else:
+        session.flush()
     return str(doc.id), len(component_by_spdx)
 
 
