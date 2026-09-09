@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 
-test('project upload, report execution, HTML and settings',async({page})=>{
+test('project upload, report execution, HTML, settings and deletion',async({page})=>{
+  test.setTimeout(60000);
   const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
   await page.goto('/');
   await expect(page.getByRole('heading',{name:'Sign in to CVEX'})).toBeVisible();
@@ -20,8 +21,10 @@ test('project upload, report execution, HTML and settings',async({page})=>{
   await expect(page.getByText('SBOM uploaded',{exact:true})).toBeVisible();
   await page.getByRole('button',{name:'Run now',exact:true}).click();
   await expect(page.getByRole('link',{name:'View HTML'})).toBeVisible({timeout:60000});
+  const reportPath=await page.getByRole('link',{name:'View HTML'}).getAttribute('href');
   const popup=page.waitForEvent('popup');await page.getByRole('link',{name:'View HTML'}).click();
   const report=await popup;await report.waitForLoadState();await expect(report.locator('body')).toContainText('Orion Systems');await expect(report.locator('body')).toContainText(name);await report.close();
+  await page.bringToFront();
   const downloaded=page.waitForEvent('download');await page.getByRole('link',{name:'Download HTML'}).click();
   expect((await downloaded).suggestedFilename()).toBe('findings.html');
   await page.screenshot({path:'test-results/project.png',fullPage:true});
@@ -36,5 +39,12 @@ test('project upload, report execution, HTML and settings',async({page})=>{
   await expect(page.getByRole('heading',{name:'Worker configuration'})).toBeVisible();
   await page.getByRole('button',{name:'Save worker settings'}).click();
   await expect(page.getByText('Worker settings saved',{exact:true})).toBeVisible();
+  await page.getByRole('button',{name:/^Projects\b/}).click();
+  await expect(page.getByRole('heading',{name:'Orion Systems — '+name})).toBeVisible();
+  await page.getByRole('button',{name:'Delete project',exact:true}).click();
+  await page.getByRole('dialog').getByRole('button',{name:'Delete permanently',exact:true}).click();
+  await expect(page.getByText('Project deleted permanently',{exact:true})).toBeVisible();
+  await expect(page.getByRole('button',{name:new RegExp(name)})).toHaveCount(0);
+  expect((await page.request.get(reportPath!)).status()).toBe(404);
   expect(errors).toEqual([]);
 });

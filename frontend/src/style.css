@@ -1253,6 +1253,7 @@ tbody tr:hover {
   }
 }
 .modal-dialog {
+  margin: auto;
   padding: 0;
   border: 1px solid var(--border);
   border-radius: 18px;
@@ -1262,6 +1263,45 @@ tbody tr:hover {
   max-height: calc(100dvh - 40px);
   overflow: auto;
   box-shadow: 0 30px 100px #0008;
+}
+.danger-button {
+  color: var(--red, #ef6b73);
+  border-color: color-mix(in srgb, #ef6b73 35%, transparent);
+}
+.danger-button:hover:not(:disabled) {
+  background: color-mix(in srgb, #ef6b73 12%, transparent);
+  border-color: #ef6b73;
+}
+.danger-button.destructive {
+  background: #b42336;
+  border-color: #b42336;
+  color: #fff;
+}
+.danger-button.destructive:hover:not(:disabled) {
+  background: #941d2d;
+}
+.delete-project-icon {
+  display: grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  margin-bottom: 22px;
+  border-radius: 16px;
+  background: color-mix(in srgb, #ef6b73 13%, transparent);
+  color: #ef6b73;
+}
+.delete-project-modal strong {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.delete-project-modal .button-row {
+  justify-content: flex-end;
+  margin-top: 28px;
+}
+.delete-project-error {
+  border-left: 3px solid #ef6b73;
+  padding: 12px;
+  background: color-mix(in srgb, #ef6b73 10%, transparent);
 }
 .modal-dialog::backdrop {
   background: #050c14b8;

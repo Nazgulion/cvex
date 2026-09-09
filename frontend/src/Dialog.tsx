@@ -5,10 +5,12 @@ export function Dialog({
   children,
   onClose,
   busy,
+  titleId = "project-dialog-title",
 }: {
   children: ReactNode;
   onClose: () => void;
   busy: boolean;
+  titleId?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
@@ -18,7 +20,11 @@ export function Dialog({
         ? document.activeElement
         : null;
     element.showModal();
-    element.querySelector<HTMLInputElement>("input:not(:disabled)")?.focus();
+    element
+      .querySelector<HTMLElement>(
+        "[data-dialog-autofocus], input:not(:disabled)",
+      )
+      ?.focus();
     return () => {
       element.close();
       if (opener?.isConnected && !element.contains(opener))
@@ -29,7 +35,7 @@ export function Dialog({
     <dialog
       ref={ref}
       className="modal-dialog"
-      aria-labelledby="project-dialog-title"
+      aria-labelledby={titleId}
       onCancel={(event) => {
         event.preventDefault();
         if (!busy) onClose();

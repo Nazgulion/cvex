@@ -88,19 +88,22 @@ def cleanup_reports(factory):
     drain_artifact_cleanup(factory)
 
 
-def drain_artifact_cleanup(factory):
+def drain_artifact_cleanup(factory, path=None):
     with factory() as db:
-        pending = rows(db, "SELECT path FROM cvex.artifact_cleanup FOR UPDATE SKIP LOCKED")
+        pending = rows(db, "SELECT path FROM cvex.artifact_cleanup WHERE (CAST(:p AS text) IS NULL OR path=:p) FOR UPDATE SKIP LOCKED", p=path)
         for item in pending:
             try:
                 directory = safe_path(item["path"])
+                if directory != storage() / item["path"]:
+                    raise ValueError("Refusing cleanup through a symlink")
                 if directory.exists():
                     shutil.rmtree(directory)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 logger.warning("Artifact cleanup deferred (%s)", type(exc).__name__)
                 continue
             query(db, "DELETE FROM cvex.artifact_cleanup WHERE path=:p", p=item["path"])
         db.commit()
+        return bool(query(db, "SELECT 1 FROM cvex.artifact_cleanup WHERE (CAST(:p AS text) IS NULL OR path=:p) LIMIT 1", p=path).first())
 
 
 def report_tick(factory, config):

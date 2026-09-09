@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import secrets
 import shutil
@@ -25,6 +26,7 @@ from cvex.config import load_config
 from cvex.db.session import make_session_factory
 from cvex.sbom import import_spdx
 from cvex.spdx_validation import validate_spdx
+from cvex.projects import delete_project, ProjectBusy, ProjectNotFound
 from cvex.time import utcnow
 from cvex.workspace import audit, cipher, enqueue, next_occurrence, password_hash, query, rows, safe_path, storage, verify_password
 
@@ -221,6 +223,25 @@ def project_detail(project_id: UUID, user=Depends(identity), db=Depends(database
             ORDER BY j.created_at DESC""", id=project_id)}
 
 
+@app.delete("/api/v1/projects/{project_id}")
+def remove_project(project_id: UUID, user=Depends(admin), db=Depends(database)):
+    from cvex.jobs import drain_artifact_cleanup
+    try:
+        path = delete_project(db, project_id, user["username"])
+        db.commit()
+    except ProjectNotFound as exc:
+        raise HTTPException(404, str(exc))
+    except ProjectBusy as exc:
+        raise HTTPException(409, str(exc))
+    # Deletion has committed: a filesystem failure must not imply that it rolled back.
+    try:
+        pending = drain_artifact_cleanup(factory(), path=path)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Project file cleanup deferred (%s)", type(exc).__name__)
+        pending = True
+    return {"ok": True, "cleanup_pending": pending}
+
+
 @app.post("/api/v1/projects/{project_id}/versions", status_code=201)
 def upload(project_id: UUID, label: str = "", make_active: bool = False, file: UploadFile = File(...), user=Depends(identity), db=Depends(database)):
     project = query(db, "SELECT * FROM cvex.project WHERE id=:p FOR UPDATE", p=project_id).mappings().first()
@@ -298,14 +319,14 @@ def artifact(job_id: UUID, kind: str, download: bool = False, user=Depends(ident
     return response
 
 
-def validate_target(db, target):
+def validate_target(db, target, lock=False):
     if target in {"nvd", "cve"}:
         return
     try:
         pid = UUID(target.removeprefix("project:"))
     except ValueError:
         raise HTTPException(404, "Unknown schedule")
-    if not target.startswith("project:") or not query(db, "SELECT 1 FROM cvex.project WHERE id=:p", p=pid).scalar():
+    if not target.startswith("project:") or not query(db, "SELECT 1 FROM cvex.project WHERE id=:p" + (" FOR UPDATE" if lock else ""), p=pid).scalar():
         raise HTTPException(404, "Unknown project")
 
 
@@ -323,7 +344,8 @@ def schedule(target: str, user=Depends(admin), db=Depends(database)):
 
 @app.put("/api/v1/schedules/{target}")
 def save_schedule(target: str, body: ScheduleInput, user=Depends(admin), db=Depends(database)):
-    validate_target(db, target)
+    query(db, "SELECT target FROM cvex.web_schedule WHERE target=:t FOR UPDATE", t=target)
+    validate_target(db, target, lock=True)
     if target.startswith("project:") and body.mode != "cron":
         raise HTTPException(422, "Projects use cron schedules")
     try:

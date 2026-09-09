@@ -1,6 +1,15 @@
 /** Shared HTTP transport; callers own cancellation and response types. */
 let csrf = "";
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    public status: number,
+  ) {
+    super(message);
+  }
+}
+
 export function setCsrf(value: string) {
   csrf = value;
 }
@@ -29,10 +38,11 @@ export async function api<T = unknown>(
     const error = await response
       .json()
       .catch(() => ({ detail: response.statusText }));
-    throw new Error(
+    throw new ApiError(
       typeof error.detail === "string"
         ? error.detail
         : JSON.stringify(error.detail),
+      response.status,
     );
   }
   return response.json() as Promise<T>;

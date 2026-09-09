@@ -24,10 +24,12 @@ import {
   X,
   FileCheck2,
   LoaderCircle,
+  Trash2,
+  TriangleAlert,
 } from "lucide-react";
 import "./style.css";
 
-import { api, setCsrf } from "./api";
+import { api, ApiError, setCsrf } from "./api";
 import { Badge, Empty, Field, Stat, Severity, when, bytes } from "./ui";
 import { useVisibility } from "./useVisibility";
 import { SyncHistory } from "./SyncHistory";
@@ -51,6 +53,10 @@ function App() {
     [project, setProject] = useState<ProjectDetail | null>(null),
     [search, setSearch] = useState(""),
     [create, setCreate] = useState(false);
+  const [deletingProject, setDeletingProject] = useState<ProjectDetail | null>(
+    null,
+  );
+  const [deleteError, setDeleteError] = useState("");
   const [status, setStatus] = useState<Status | null>(null),
     [connected, setConnected] = useState(false),
     [settingsTarget, setSettingsTarget] = useState("nvd");
@@ -71,6 +77,8 @@ function App() {
     setStatus(null);
     setPage("projects");
     setCreate(false);
+    setDeletingProject(null);
+    setDeleteError("");
     setActivity([]);
     setUsers([]);
   };
@@ -112,12 +120,22 @@ function App() {
               "GET",
               undefined,
               controller.signal,
-            )
+            ).catch((error) => {
+              if (error instanceof ApiError && error.status === 404)
+                return null;
+              throw error;
+            })
           : Promise.resolve(null),
       ]);
       if (!controller.signal.aborted && selection === activeSelection.current) {
         setProjects(list);
         setProject(detail);
+        if (selection && !detail) {
+          activeSelection.current = null;
+          setSelected(null);
+          setDeletingProject(null);
+          setNotice("This project is no longer available.");
+        }
       }
     } catch (e) {
       if (!controller.signal.aborted) throw e;
@@ -204,7 +222,7 @@ function App() {
     setBusy(true);
     try {
       await action();
-      setNotice(message);
+      if (message) setNotice(message);
       await refresh();
     } catch (e) {
       setError((e as Error).message);
@@ -558,6 +576,18 @@ function App() {
                   </p>
                 </div>
                 <div className="button-row">
+                  {user.role === "admin" && (
+                    <button
+                      className="danger-button"
+                      disabled={busy}
+                      onClick={() => {
+                        setDeleteError("");
+                        setDeletingProject(project);
+                      }}
+                    >
+                      <Trash2 size={16} /> Delete project
+                    </button>
+                  )}
                   {user.role === "admin" && (
                     <button onClick={() => openSettings("project:" + selected)}>
                       <Clock size={16} />
@@ -1153,6 +1183,92 @@ function App() {
               Create project <ChevronRight size={16} />
             </button>
           </form>
+        </Dialog>
+      )}
+      {deletingProject && user.role === "admin" && (
+        <Dialog
+          titleId="delete-project-title"
+          onClose={() => setDeletingProject(null)}
+          busy={busy}
+        >
+          <div className="modal delete-project-modal">
+            <div className="delete-project-icon">
+              <TriangleAlert size={26} />
+            </div>
+            <span className="eyebrow">PERMANENT DELETION</span>
+            <h2 id="delete-project-title">Delete this project?</h2>
+            <p>
+              Are you sure you want to delete{" "}
+              <strong>
+                {deletingProject.company} — {deletingProject.name}
+              </strong>
+              ?
+            </p>
+            <p>
+              All uploaded files, project versions, scheduled runs, reports and
+              findings for this project will be permanently removed. This cannot
+              be undone.
+            </p>
+            <p className="muted">
+              Other projects, shared SBOM catalog data and NVD/CVE
+              synchronization are not affected. If a report is running, wait for
+              it to finish first.
+            </p>
+            {deleteError && (
+              <p className="delete-project-error" role="alert">
+                {deleteError}
+              </p>
+            )}
+            <div className="button-row">
+              <button
+                data-dialog-autofocus
+                disabled={busy}
+                onClick={() => setDeletingProject(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="danger-button destructive"
+                disabled={busy}
+                onClick={() =>
+                  act(async () => {
+                    setDeleteError("");
+                    try {
+                      const result = await api<{ cleanup_pending: boolean }>(
+                        `/projects/${deletingProject.id}`,
+                        "DELETE",
+                      );
+                      refreshRequest.current?.abort();
+                      activeSelection.current = null;
+                      setSelected(null);
+                      setProject(null);
+                      setProjects((previous) =>
+                        previous.filter(
+                          (item) => item.id !== deletingProject.id,
+                        ),
+                      );
+                      setDeletingProject(null);
+                      setNotice(
+                        result.cleanup_pending
+                          ? "Project deleted. File cleanup will retry automatically."
+                          : "Project deleted permanently",
+                      );
+                    } catch (e) {
+                      setDeleteError((e as Error).message);
+                      throw e;
+                    }
+                  }, "")
+                }
+              >
+                {busy ? (
+                  <LoaderCircle size={16} className="spin" />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+                {busy ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </div>
         </Dialog>
       )}
     </div>
