@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import { Badge, Field, inZone } from "./ui";
 import type { Project, Schedule, WorkerSettings } from "./types";
+import { SourceActivity } from "./SourceActivity";
 export function SettingsPanel({
   target,
   projects,
@@ -83,6 +84,13 @@ export function SettingsPanel({
         </div>
         <div className="settings-content">
           {error && <div className="alert">{error}</div>}
+          {source && (
+            <SourceActivity
+              key={target}
+              source={target}
+              refreshVersion={schedule?.version}
+            />
+          )}
           {!schedulable && (
             <div className="panel">
               <h2>{target}</h2>
@@ -207,15 +215,20 @@ export function SettingsPanel({
               <button disabled={busy} className="primary">
                 Save schedule
               </button>
-              <div className="upcoming">
-                <small>NEXT FIVE OCCURRENCES · SAVED CONFIGURATION</small>
-                {schedule.upcoming?.map((d: string) => (
-                  <div key={d}>
-                    {inZone(d, schedule.timezone)}{" "}
-                    <span>{schedule.timezone}</span>
-                  </div>
-                ))}
-              </div>
+              {!source && (
+                <div className="upcoming">
+                  <small>NEXT FIVE OCCURRENCES · SAVED CONFIGURATION</small>
+                  {schedule.upcoming?.map((d: string) => (
+                    <div key={d}>
+                      {inZone(d, schedule.timezone)}{" "}
+                      <span>{schedule.timezone}</span>
+                    </div>
+                  ))}
+                  {!schedule.enabled && (
+                    <p>Schedule paused. No automatic runs are scheduled.</p>
+                  )}
+                </div>
+              )}
             </form>
           )}
           {settings && (

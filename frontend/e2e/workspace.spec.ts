@@ -41,6 +41,12 @@ test('project upload, report execution, HTML, settings and deletion',async({page
   await expect(page.getByText('Worker settings saved',{exact:true})).toBeVisible();
   await page.getByRole('button',{name:/^Projects\b/}).click();
   await expect(page.getByRole('heading',{name:'Orion Systems — '+name})).toBeVisible();
+  // Deleting one report must leave the SBOM/project ready for another scan.
+  await page.getByRole('button',{name:'Delete report',exact:true}).click();
+  await page.getByRole('dialog',{name:'Delete this report?'}).getByRole('button',{name:'Delete permanently',exact:true}).click();
+  await expect(page.getByText('Report deleted permanently',{exact:true})).toBeVisible();
+  expect((await page.request.get(reportPath!)).status()).toBe(404);
+  await expect(page.getByRole('region',{name:'Selected SBOM for scanning'})).toContainText('gateway.spdx.json');
   await page.getByRole('button',{name:'Delete project',exact:true}).click();
   await page.getByRole('dialog').getByRole('button',{name:'Delete permanently',exact:true}).click();
   await expect(page.getByText('Project deleted permanently',{exact:true})).toBeVisible();

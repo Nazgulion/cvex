@@ -6,6 +6,7 @@ from cvex.config import load_config
 from cvex.db.session import make_session_factory
 from cvex.jobs import heartbeat
 from cvex.source_lock import source_lock
+from cvex.sync_history import error_type, reconcile_sync_history, start_sync_history
 from cvex.time import utcnow
 from cvex.util import duration_seconds
 from cvex.workspace import cipher, next_occurrence, query, telemetry
@@ -21,6 +22,7 @@ def source_tick(factory, source):
         config = load_config()
         original = config.sources[source]
         with factory() as db:
+            reconcile_sync_history(db, source)
             query(db, """INSERT INTO cvex.web_schedule(target,mode,enabled,interval_seconds,next_run)
               VALUES(:s,'interval',:e,:i,now()) ON CONFLICT DO NOTHING""",
               s=source, e=original.enabled, i=int(duration_seconds(original.sync_interval)))
@@ -47,14 +49,29 @@ def source_tick(factory, source):
             details["changed"] += changed
             details["phase"] = "Materializing source batches"
 
+        with factory() as db:
+            history_id = start_sync_history(db, source)
+            db.commit()
         token = batch_progress.set(on_batch)
         try:
             with heartbeat(factory, source, "running", details):
                 result = (cve_sync_cycle if source == "cve" else nvd_sync_cycle)(factory, config)
+        except Exception as exc:
+            with factory() as db:
+                query(db, """UPDATE cvex.sync_history SET status='failed',finished_at=now(),
+                  processed=:p,changed=:c,error_type=:e WHERE id=:id""",
+                  id=history_id, p=details["processed"], c=details["changed"], e=type(exc).__name__)
+                db.commit()
+            raise
         finally:
             batch_progress.reset(token)
         with factory() as db:
-            state = query(db, "SELECT status,next_retry_at FROM cvex.connector_state WHERE source=:s", s=source).mappings().one()
+            state = query(db, "SELECT status,next_retry_at,last_error FROM cvex.connector_state WHERE source=:s", s=source).mappings().one()
+            history_status = "deferred" if ": retry_wait " in result.message else "failed" if state["status"] == "retrying" else "succeeded"
+            query(db, """UPDATE cvex.sync_history SET status=:status,finished_at=now(),
+              processed=:p,changed=:c,error_type=:e WHERE id=:id""",
+              id=history_id, status=history_status, p=details["processed"], c=details["changed"],
+              e=error_type(state["last_error"]) if history_status != "succeeded" else None)
             next_run = state["next_retry_at"] if state["status"] == "retrying" else next_occurrence(schedule)
             query(db, "UPDATE cvex.web_schedule SET next_run=:n WHERE target=:s AND version=:v", n=next_run, s=source, v=schedule["version"])
             telemetry(db, source, state["status"], phase="Cycle complete", version=setting["version"],

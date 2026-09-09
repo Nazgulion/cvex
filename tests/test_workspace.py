@@ -77,6 +77,17 @@ def test_workspace_api_execution_and_retention(tmp_path, monkeypatch):
     jid = client.post(f"/api/v1/projects/{pid}/runs").json()["id"]
     assert client.post(f"/api/v1/projects/{pid}/runs").json()["id"] == jid
     import cvex.jobs as jobs
+    # A retried scan must not display the previous attempt's percentage.
+    with factory() as db:
+        query(db, "UPDATE cvex.report_job SET progress=99,total=100 WHERE id=:id", id=jid)
+        db.commit()
+    original_match = jobs.run_match
+    def checked_match(db, *args, **kwargs):
+        with factory() as observer:
+            current = query(observer, "SELECT progress,total FROM cvex.report_job WHERE state='scanning'").mappings().one()
+            assert current["progress"] == 0 and current["total"] is None
+        return original_match(db, *args, **kwargs)
+    monkeypatch.setattr(jobs, "run_match", checked_match)
     render = jobs._render_findings_html
     def broken_export(_payload):
         raise OSError("simulated interrupted export")

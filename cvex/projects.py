@@ -10,6 +10,41 @@ class ProjectBusy(ValueError):
     pass
 
 
+class ReportNotFound(ValueError):
+    pass
+
+
+class ReportBusy(ValueError):
+    pass
+
+
+def delete_report(db, project_id, job_id, actor):
+    """Delete one terminal report; serialize with retention, project deletion and job claims."""
+    query(db, "SELECT pg_advisory_xact_lock(7401003)")
+    query(db, "SELECT id FROM cvex.project WHERE id=:p FOR UPDATE", p=project_id)
+    job = query(db, "SELECT * FROM cvex.report_job WHERE id=:j AND project_id=:p FOR UPDATE",
+                j=job_id, p=project_id).mappings().first()
+    if not job:
+        raise ReportNotFound("Report not found in project")
+    if job["state"] not in {"succeeded", "partial", "failed", "expired"}:
+        raise ReportBusy("This report is queued or running. Wait for it to finish before deleting it.")
+    snapshot_scan = query(db, "SELECT scan_id FROM cvex.report_snapshot WHERE job_id=:j", j=job_id).scalar()
+    relative = f"projects/{project_id}/reports/{job_id}"
+    paths = [relative, relative + ".pending"]
+    for path in paths:
+        query(db, "INSERT INTO cvex.artifact_cleanup(path) VALUES(:p) ON CONFLICT DO NOTHING", p=path)
+    query(db, "DELETE FROM cvex.report_snapshot WHERE job_id=:j", j=job_id)
+    query(db, "DELETE FROM cvex.report_job WHERE id=:j", j=job_id)
+    for sid in {job["scan_id"], snapshot_scan} - {None}:
+        if query(db, """SELECT 1 FROM cvex.report_job WHERE scan_id=:s
+          UNION ALL SELECT 1 FROM cvex.report_snapshot WHERE scan_id=:s""", s=sid).first():
+            continue
+        query(db, "DELETE FROM cvex.report_export WHERE scan_id=:s", s=sid)
+        query(db, "DELETE FROM cvex.scan WHERE id=:s", s=sid)
+    audit(db, actor, "report_deleted", project_id=project_id, job_id=job_id, state=job["state"])
+    return paths
+
+
 def delete_project(db, project_id, actor):
     # Coordinate retention, then use the scheduler's schedule -> project lock order.
     query(db, "SELECT pg_advisory_xact_lock(7401003)")

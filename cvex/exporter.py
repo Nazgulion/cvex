@@ -807,6 +807,16 @@ def _render_findings_html(payload: dict[str, Any]) -> str:
     if not rows:
         rows = '<tr><td colspan="7" class="empty">No findings.</td></tr>'
     errors = payload.get("assessment_errors", [])
+    comparison = payload.get("comparison")
+    comparison_banner = ""
+    if comparison is not None:
+        if comparison.get("available"):
+            new_count = comparison.get("new_count", 0)
+            jump = '<a href="#new-finding-1">Jump to a new finding ↓</a>' if new_count else ''
+            caution = '<p>Comparison includes a partial baseline: some previous findings may have been unassessed.</p>' if comparison.get("baseline_partial") else ''
+            comparison_banner = f'<section class="new-findings-banner" aria-label="New findings summary"><strong>{_e(new_count)} new finding{"s" if new_count != 1 else ""} since the previous report</strong><p>Compared with {_e(comparison.get("baseline_created_at"))} · SBOM version {_e(comparison.get("baseline_release") or "—")}. Green means newly present, not lower risk.</p>{caution}{jump}</section>'
+        else:
+            comparison_banner = '<section class="comparison-note">No earlier report with available findings to compare. This report establishes a baseline; no findings are labeled new.</section>'
     error_banner = (
         '<div class="warning"><strong>Partial scan: some components could not be assessed.</strong><ul>'
         + ''.join(f'<li>{_e(row["component"])}: {_e(row["message"])}</li>' for row in errors)
@@ -985,6 +995,15 @@ def _render_findings_html(payload: dict[str, Any]) -> str:
       gap: 8px;
     }}
     .inline-list {{ margin-top: 3px; }}
+    .new-findings-banner {{ border: 1px solid #46d98b; border-left-width: 4px; border-radius: 8px; background: #112a20; padding: 14px 16px; margin-bottom: 14px; }}
+    .new-findings-banner strong {{ color: #7ff0ab; font-size: 17px; }}
+    .new-findings-banner p {{ margin: 7px 0; color: #c1d4c9; }}
+    .new-findings-banner a {{ display: inline-block; color: #7ff0ab; margin-top: 5px; font-weight: 700; }}
+    .comparison-note {{ color: var(--muted); margin: 0 0 14px; }}
+    .component-has-new > .component-row-cell {{ border-left: 4px solid #46d98b; }}
+    .finding-card.new-finding {{ border: 2px solid #46d98b; background: #13271f; box-shadow: 0 0 0 2px #46d98b18; scroll-margin-top: 55px; }}
+    .finding-card.new-finding:target {{ outline: 3px solid #a4ffbf; outline-offset: 3px; }}
+    .new-finding-badge {{ display: inline-block; border: 1px solid #46d98b; border-radius: 999px; padding: 3px 8px; margin: 0 0 7px; color: #8bf6b5; background: #17432d; font-weight: 700; font-size: 10px; letter-spacing: .05em; }}
     @media (max-width: 1100px) {{
       .meta, .metrics {{ grid-template-columns: repeat(2, minmax(140px, 1fr)); }}
       .panel {{ overflow-x: auto; }}
@@ -1004,6 +1023,7 @@ def _render_findings_html(payload: dict[str, Any]) -> str:
       <div class="muted">Generated {_e(metadata["generated_at"])}</div>
     </div>
     {error_banner}
+    {comparison_banner}
     <div class="meta">
       {_meta_item("Client", metadata["client"])}
       {_meta_item("Product", metadata["product"])}
@@ -1043,19 +1063,19 @@ def _render_findings_html(payload: dict[str, Any]) -> str:
 
 def _group_findings_for_html(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     groups_by_key: dict[str, dict[str, Any]] = {}
-    for row in sorted(findings, key=_html_finding_sort_key):
+    for row in sorted(findings, key=lambda row: (not row.get("new_finding", False), _html_finding_sort_key(row))):
         component = row["component"]
         key = str(component.get("id") or f"{component.get('name')}:{component.get('normalized_version') or component.get('raw_version')}")
         if key not in groups_by_key:
             groups_by_key[key] = {"component": component, "findings": []}
         groups_by_key[key]["findings"].append(row)
     groups = list(groups_by_key.values())
-    groups.sort(key=_html_component_sort_key)
+    groups.sort(key=lambda group: (not any(row.get("new_finding") for row in group["findings"]), _html_component_sort_key(group)))
     return groups
 
 
 def _html_component_sort_key(group: dict[str, Any]) -> tuple[int, float, str]:
-    top = group["findings"][0]
+    top = min(group["findings"], key=_html_finding_sort_key)
     vulnerability = top["vulnerability"]
     score = vulnerability.get("score")
     numeric_score = float(score) if isinstance(score, (int, float)) else -1.0
@@ -1069,7 +1089,7 @@ def _html_component_sort_key(group: dict[str, Any]) -> tuple[int, float, str]:
 def _render_component_row(group: dict[str, Any]) -> str:
     component = group["component"]
     findings = group["findings"]
-    top = findings[0]
+    top = min(findings, key=_html_finding_sort_key)
     top_vulnerability = top["vulnerability"]
     severity_counts = Counter((row["vulnerability"].get("severity") or "unknown") for row in findings)
     decision_counts = Counter(row["decision"]["status"] for row in findings)
@@ -1082,9 +1102,13 @@ def _render_component_row(group: dict[str, Any]) -> str:
         cve_html += _pill(f"+{more_cves} more", "sev-none")
     evidence_summary = _component_evidence_summary(findings)
     details = "\n".join(_render_finding_detail(row) for row in findings)
-    return f"""<tr data-component-row="true">
+    new_count = sum(row.get("new_finding") is True for row in findings)
+    new_badge = f'<div class="new-finding-badge">{new_count} NEW FINDING{"S" if new_count != 1 else ""}</div>' if new_count else ''
+    new_class = ' class="component-has-new"' if new_count else ''
+    open_attribute = ' open' if new_count else ''
+    return f"""<tr data-component-row="true"{new_class}>
   <td colspan="7" class="component-row-cell">
-    <details class="component-summary">
+    <details class="component-summary"{open_attribute}>
       <summary>
         <div class="component-row-grid">
           <div>
@@ -1093,6 +1117,7 @@ def _render_component_row(group: dict[str, Any]) -> str:
           </div>
           <div>
             <div class="component-count">{len(findings)}</div>
+            {new_badge}
             <div class="muted">unique CVEs</div>
           </div>
           <div>
@@ -1137,7 +1162,11 @@ def _render_finding_detail(row: dict[str, Any]) -> str:
     if warning_text:
         warning_html = f'<div class="detail-title">Warnings</div><div class="warning">{_e(warning_text)}</div>'
     description = vulnerability["description"] or ""
-    return f"""<div class="finding-card">
+    new_class = ' new-finding' if row.get("new_finding") else ''
+    new_id = f' id="new-finding-{_e(row.get("new_finding_index", ""))}"' if row.get("new_finding") else ''
+    new_badge = '<div class="new-finding-badge">NEW FINDING</div>' if row.get("new_finding") else ''
+    return f"""<div class="finding-card{new_class}"{new_id}>
+  {new_badge}
   <div class="finding-head">
     <div>
       <div class="mono">{_e(vulnerability["id"])}</div>

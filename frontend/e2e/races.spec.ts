@@ -13,6 +13,7 @@ test('late NVD settings cannot replace the selected CVE settings', async ({ page
     if (path.endsWith('/auth/me')) body = { username: 'admin', role: 'admin', csrf: 'test' };
     if (path.endsWith('/projects')) body = [];
     if (path.endsWith('/admin/status')) body = { workers: [], sources: [], schedules: [], queue: [], jobs: [] };
+    if (path.includes('/sync-history/')) body = { history: [], latest: null, totals: {runs:0,succeeded:0,failed:0,processed:0,changed:0}, offset:0, limit:25, server_time:new Date().toISOString(), source_state:null, worker:null, schedule:null };
     if (path.includes('/schedules/')) body = { enabled: false, mode: 'cron', expression: '0 7 * * *', timezone: 'UTC', interval_seconds: 1800, upcoming: [] };
     if (path.endsWith('/settings/nvd')) {
       nvdStarted();

@@ -18,7 +18,7 @@ export function SyncHistory({ status }: { status: Status | null }) {
         </div>
         <span className="history-note">
           <Clock3 size={14} />
-          Latest 12 ingestion runs
+          Latest 12 runs · last 10 days
         </span>
       </div>
       <div className="table-wrap">
@@ -47,7 +47,9 @@ export function SyncHistory({ status }: { status: Status | null }) {
                 <td>{when(run.finished_at)}</td>
                 <td className="numeric">
                   {run.duration_seconds === null
-                    ? "In progress"
+                    ? run.status === "running"
+                      ? "In progress"
+                      : "—"
                     : `${Number(run.duration_seconds).toFixed(1)}s`}
                 </td>
                 <td className="numeric">{number(run.processed)}</td>
@@ -68,9 +70,10 @@ export function SyncHistory({ status }: { status: Status | null }) {
         )}
       </div>
       <p className="history-note">
-        Changed records include additions and updates. Duration measures
-        ingestion; CVE Git preparation happens before its ingestion run. Missing
-        counts are shown as —, not zero.
+        Changed records include additions and updates, not just newly published
+        CVEs. New worker timings include fetching; legacy timings measure
+        ingestion only. Click an NVD or CVE worker to see its full 10-day
+        history and next five runs.
       </p>
     </section>
   );

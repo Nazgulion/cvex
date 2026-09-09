@@ -14,6 +14,8 @@ from cvex.db.models import Product, SbomDocument, Scan
 from cvex.db.session import make_session_factory
 from cvex.exporter import build_findings_payload, build_summary_payload, _render_findings_html, _write_findings_csv
 from cvex.matcher import run_match
+from cvex.report_comparison import compare_previous_report
+from cvex.sync_history import prune_sync_history
 from cvex.time import utcnow
 from cvex.workspace import audit, enqueue, next_occurrence, query, rows, safe_path, storage, telemetry
 
@@ -134,7 +136,11 @@ def _report_tick(factory, config):
             return
         job = dict(job)
         job["scan_id"] = job["snapshot_scan_id"] or job["scan_id"]
-        query(db, "UPDATE cvex.report_job SET state='scanning',started_at=COALESCE(started_at,now()),heartbeat_at=now(),attempts=attempts+1 WHERE id=:id", id=job["id"])
+        query(db, """UPDATE cvex.report_job SET state=:phase,started_at=COALESCE(started_at,now()),
+          progress=CASE WHEN :resume THEN progress ELSE 0 END,
+          total=CASE WHEN :resume THEN total ELSE NULL END,
+          heartbeat_at=now(),attempts=attempts+1 WHERE id=:id""",
+          id=job["id"], resume=bool(job["frozen_payload"]), phase="exporting" if job["frozen_payload"] else "scanning")
         db.commit()
     details = {"job_id": str(job["id"]), "project_id": str(job["project_id"]), "phase": "scanning"}
     try:
@@ -158,6 +164,7 @@ def _report_tick(factory, config):
                     # Presentation metadata belongs to the project, even for deduplicated SBOMs.
                     product = Product(client_name=version["company"], product_name=version["name"], release_version=version["label"])
                     findings = build_findings_payload(db, config, scan, sbom, product, str(job["id"]))
+                    compare_previous_report(db, job, findings)
                     summary = build_summary_payload(db, config, scan, sbom, product, str(job["id"]))
                     frozen = {"findings": findings, "summary": summary, "scan_status": scan.status}
                     # Commit the snapshot and frozen payload together, without updating the separately heartbeating job row.
@@ -215,6 +222,7 @@ def serve_background(kind):
                     total = sum(p.stat().st_size for p in storage().glob("projects/*/reports/*/*") if p.is_file())
                     with factory() as db:
                         telemetry(db,"storage","healthy",phase="Project report storage",report_bytes=total)
+                        prune_sync_history(db)
                         db.commit()
                     cleanup_reports(factory)
                     last_storage_sample = time.monotonic()

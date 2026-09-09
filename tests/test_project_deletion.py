@@ -210,3 +210,95 @@ def test_concurrent_schedule_and_enqueue_cannot_resurrect_deleted_project(worksp
     with factory() as db:
         assert not query(db, "SELECT 1 FROM cvex.web_schedule WHERE target=:t", t="project:" + pid).scalar()
         assert not query(db, "SELECT 1 FROM cvex.report_job WHERE project_id=:p", p=UUID(pid)).scalar()
+
+
+def test_delete_one_report_preserves_project_sbom_schedule_and_other_reports(workspace):
+    factory, clients, projects, root = workspace
+    target, other = projects
+    removed = add_report(factory, target, root)
+    kept = add_report(factory, target, root)
+    foreign = add_report(factory, other, root)
+    admin = clients["admin"]
+    path = f"/api/v1/projects/{target['id']}/runs/{removed[0]}"
+    pending = root / f"projects/{target['id']}/reports/{removed[0]}.pending"
+    pending.mkdir()
+    response = admin.delete(path)
+    assert response.status_code == 200, response.text
+    assert response.json()["cleanup_pending"] is False
+    assert not pending.exists()
+    assert not (root / f"projects/{target['id']}/reports/{removed[0]}").exists()
+    assert admin.get(f"/api/v1/runs/{removed[0]}/artifacts/html").status_code == 404
+    for report in (kept, foreign):
+        assert admin.get(f"/api/v1/runs/{report[0]}/artifacts/html").status_code == 200
+    assert admin.get(f"/api/v1/projects/{target['id']}").json()["versions"]
+    assert admin.get(f"/api/v1/schedules/project:{target['id']}").status_code == 200
+    assert admin.delete(path).status_code == 404
+    with factory() as db:
+        for table, column, value in (("scan", "id", removed[1]), ("report_snapshot", "job_id", removed[0]),
+                                     ("report_export", "scan_id", removed[1]), ("scan_component_result", "scan_id", removed[1]),
+                                     ("vulnerability_finding", "id", removed[2]), ("finding_evidence", "finding_id", removed[2])):
+            assert not query(db, f"SELECT 1 FROM cvex.{table} WHERE {column}=:id", id=value).scalar()
+        assert query(db, "SELECT 1 FROM cvex.source_payload WHERE id=:p", p=removed[3]).scalar()
+        assert query(db, "SELECT count(*) FROM cvex.web_audit WHERE action='report_deleted' AND details->>'job_id'=:j", j=str(removed[0])).scalar() == 1
+
+
+def test_report_deletion_requires_admin_csrf_and_correct_project(workspace):
+    from fastapi.testclient import TestClient
+    from cvex.web import app
+    factory, clients, projects, root = workspace
+    report = add_report(factory, projects[0], root)
+    path = f"/api/v1/projects/{projects[0]['id']}/runs/{report[0]}"
+    with TestClient(app) as anonymous:
+        assert anonymous.delete(path).status_code == 401
+    assert clients["user"].delete(path).status_code == 403
+    assert clients["admin"].delete(path, headers={"X-CSRF-Token": "invalid"}).status_code == 403
+    assert clients["admin"].delete(f"/api/v1/projects/{projects[1]['id']}/runs/{report[0]}").status_code == 404
+    assert clients["admin"].get(f"/api/v1/runs/{report[0]}/artifacts/html").status_code == 200
+
+
+@pytest.mark.parametrize("state", ["queued", "scanning", "exporting"])
+def test_report_deletion_blocks_unfinished_jobs(workspace, state):
+    factory, clients, projects, root = workspace
+    report = add_report(factory, projects[0], root, state=state)
+    response = clients["admin"].delete(f"/api/v1/projects/{projects[0]['id']}/runs/{report[0]}")
+    assert response.status_code == 409
+    with factory() as db:
+        assert query(db, "SELECT state FROM cvex.report_job WHERE id=:j", j=report[0]).scalar() == state
+
+
+def test_report_deletion_rolls_back_then_retries_failed_file_cleanup(workspace, monkeypatch):
+    import cvex.projects as deletion
+    import cvex.jobs as jobs
+    factory, clients, projects, root = workspace
+    report = add_report(factory, projects[0], root, state="failed", snapshot_only=True)
+    path = f"/api/v1/projects/{projects[0]['id']}/runs/{report[0]}"
+    directory = root / f"projects/{projects[0]['id']}/reports/{report[0]}"
+    def fail(*args, **kwargs):
+        raise OSError("simulated failure")
+    with monkeypatch.context() as patch:
+        patch.setattr(deletion, "audit", fail)
+        assert clients["admin"].delete(path).status_code == 500
+    with factory() as db:
+        assert query(db, "SELECT 1 FROM cvex.report_snapshot WHERE job_id=:j", j=report[0]).scalar()
+    assert directory.exists()
+    with monkeypatch.context() as patch:
+        patch.setattr(jobs.shutil, "rmtree", fail)
+        response = clients["admin"].delete(path)
+        assert response.status_code == 200 and response.json()["cleanup_pending"] is True
+    with factory() as db:
+        assert not query(db, "SELECT 1 FROM cvex.scan WHERE id=:s", s=report[1]).scalar()
+    jobs.drain_artifact_cleanup(factory)
+    assert not directory.exists()
+
+
+def test_report_deletion_preserves_scan_referenced_by_another_snapshot(workspace):
+    factory, clients, projects, root = workspace
+    removed = add_report(factory, projects[0], root)
+    kept = add_report(factory, projects[0], root)
+    with factory() as db:
+        query(db, "UPDATE cvex.report_snapshot SET scan_id=:s WHERE job_id=:j", s=removed[1], j=kept[0])
+        db.commit()
+    assert clients["admin"].delete(f"/api/v1/projects/{projects[0]['id']}/runs/{removed[0]}").status_code == 200
+    with factory() as db:
+        assert query(db, "SELECT 1 FROM cvex.scan WHERE id=:s", s=removed[1]).scalar()
+        assert query(db, "SELECT 1 FROM cvex.finding_evidence WHERE finding_id=:f", f=removed[2]).scalar()

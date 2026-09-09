@@ -14,7 +14,7 @@ from typing import Literal
 from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, UploadFile
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,8 +26,9 @@ from cvex.config import load_config
 from cvex.db.session import make_session_factory
 from cvex.sbom import import_spdx
 from cvex.spdx_validation import validate_spdx
-from cvex.projects import delete_project, ProjectBusy, ProjectNotFound
+from cvex.projects import delete_project, delete_report, ProjectBusy, ProjectNotFound, ReportBusy, ReportNotFound
 from cvex.time import utcnow
+from cvex.sync_history import upcoming_runs
 from cvex.workspace import audit, cipher, enqueue, next_occurrence, password_hash, query, rows, safe_path, storage, verify_password
 
 app = FastAPI(title="CVEX Workspace", docs_url=None, redoc_url=None)
@@ -242,6 +243,26 @@ def remove_project(project_id: UUID, user=Depends(admin), db=Depends(database)):
     return {"ok": True, "cleanup_pending": pending}
 
 
+@app.delete("/api/v1/projects/{project_id}/runs/{job_id}")
+def remove_report(project_id: UUID, job_id: UUID, user=Depends(admin), db=Depends(database)):
+    from cvex.jobs import drain_artifact_cleanup
+    try:
+        paths = delete_report(db, project_id, job_id, user["username"])
+        db.commit()
+    except ReportNotFound as exc:
+        raise HTTPException(404, str(exc))
+    except ReportBusy as exc:
+        raise HTTPException(409, str(exc))
+    pending = False
+    try:
+        for path in paths:
+            pending = drain_artifact_cleanup(factory(), path=path) or pending
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Report file cleanup deferred (%s)", type(exc).__name__)
+        pending = True
+    return {"ok": True, "cleanup_pending": pending}
+
+
 @app.post("/api/v1/projects/{project_id}/versions", status_code=201)
 def upload(project_id: UUID, label: str = "", make_active: bool = False, file: UploadFile = File(...), user=Depends(identity), db=Depends(database)):
     project = query(db, "SELECT * FROM cvex.project WHERE id=:p FOR UPDATE", p=project_id).mappings().first()
@@ -335,11 +356,37 @@ def schedule(target: str, user=Depends(admin), db=Depends(database)):
     validate_target(db, target)
     value = query(db, "SELECT * FROM cvex.web_schedule WHERE target=:t", t=target).mappings().first()
     result = dict(value) if value else {"target": target, **ScheduleInput().model_dump()}
-    upcoming, after = [], utcnow()
-    for _ in range(5):
-        after = next_occurrence(result, after)
-        upcoming.append(after)
-    return {**result, "upcoming": upcoming}
+    return {**result, "upcoming": upcoming_runs(result)}
+
+
+@app.get("/api/v1/admin/sync-history/{source}")
+def sync_history(source: Literal["nvd", "cve"], offset: int = Query(0, ge=0, le=100000),
+                 user=Depends(admin), db=Depends(database)):
+    now = utcnow()
+    cutoff = now - timedelta(days=10)
+    history = rows(db, """SELECT *,extract(epoch FROM finished_at-started_at) duration_seconds
+      FROM cvex.sync_history WHERE source=:s AND started_at>=:cutoff
+      ORDER BY started_at DESC,id DESC LIMIT 25 OFFSET :offset""", s=source, cutoff=cutoff, offset=offset)
+    totals = dict(query(db, """SELECT count(*) runs,
+      count(*) FILTER (WHERE status='succeeded') succeeded,
+      count(*) FILTER (WHERE status IN ('failed','interrupted')) failed,
+      COALESCE(sum(processed),0) processed,COALESCE(sum(changed),0) changed
+      FROM cvex.sync_history WHERE source=:s AND started_at>=:cutoff""", s=source, cutoff=cutoff).mappings().one())
+    latest = query(db, """SELECT *,extract(epoch FROM finished_at-started_at) duration_seconds
+      FROM cvex.sync_history WHERE source=:s AND started_at>=:cutoff AND finished_at IS NOT NULL
+      ORDER BY started_at DESC,id DESC LIMIT 1""", s=source, cutoff=cutoff).mappings().first()
+    state = query(db, """SELECT source,status,health,last_success,last_attempt,next_retry_at,error_count
+      FROM cvex.connector_state WHERE source=:s""", s=source).mappings().first()
+    worker = query(db, """SELECT name,state,phase,heartbeat_at,heartbeat_at<:now-interval '15 seconds' stale
+      FROM cvex.worker_telemetry WHERE name=:s""", s=source, now=now).mappings().first()
+    saved = query(db, "SELECT * FROM cvex.web_schedule WHERE target=:s", s=source).mappings().first()
+    running = bool(worker and worker["state"] == "running" and not worker["stale"])
+    return {"source": source, "history": history, "totals": totals, "offset": offset, "limit": 25,
+            "retention_days": 10, "server_time": now, "latest": dict(latest) if latest else None,
+            "source_state": dict(state) if state else None,
+            "worker": dict(worker) if worker else None,
+            "schedule": {**dict(saved), "upcoming": upcoming_runs(saved, now=now, running=running),
+                         "estimated": running or saved["mode"] == "interval", "running": running} if saved else None}
 
 
 @app.put("/api/v1/schedules/{target}")
@@ -400,8 +447,9 @@ def status_payload(db):
     return {"workers": rows(db, "SELECT *,CASE WHEN name='storage' THEN heartbeat_at<now()-interval '90 seconds' ELSE heartbeat_at<now()-interval '15 seconds' END stale FROM cvex.worker_telemetry ORDER BY name"),
             "recent_syncs": rows(db, """SELECT id,source,status,started_at,finished_at,
               extract(epoch FROM finished_at-started_at) duration_seconds,
-              details->>'records_seen' processed,details->>'records_changed' changed
-              FROM cvex.source_run WHERE source IN ('nvd','cve') ORDER BY started_at DESC LIMIT 12"""),
+              processed::text processed,changed::text changed
+              FROM cvex.sync_history WHERE started_at>=now()-interval '10 days'
+              ORDER BY started_at DESC,id DESC LIMIT 12"""),
             "sources": rows(db, "SELECT source,status,health,last_success,last_attempt,error_count,next_retry_at,CASE WHEN last_error IS NOT NULL THEN split_part(last_error, ':', 1) END error_type FROM cvex.connector_state ORDER BY source"),
             "schedules": rows(db, "SELECT target,enabled,next_run,version FROM cvex.web_schedule ORDER BY target"),
             "queue": rows(db, "SELECT state,count(*) count,min(created_at) oldest FROM cvex.report_job WHERE state IN ('queued','scanning','exporting') GROUP BY state"),

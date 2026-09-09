@@ -34,11 +34,20 @@ import { Badge, Empty, Field, Stat, Severity, when, bytes } from "./ui";
 import { useVisibility } from "./useVisibility";
 import { SyncHistory } from "./SyncHistory";
 import { Dialog } from "./Dialog";
+import { ReportProgress } from "./ReportProgress";
+import { previousReports } from "./reportComparison";
 const Architecture = lazy(() =>
   import("./Architecture").then((module) => ({ default: module.Architecture })),
 );
 import { SettingsPanel } from "./SettingsPanel";
-import type { User, Project, ProjectDetail, Status, AuditEvent } from "./types";
+import type {
+  User,
+  Project,
+  ProjectDetail,
+  ReportJob,
+  Status,
+  AuditEvent,
+} from "./types";
 
 function App() {
   const visible = useVisibility();
@@ -57,6 +66,12 @@ function App() {
     null,
   );
   const [deleteError, setDeleteError] = useState("");
+  const [deletingReport, setDeletingReport] = useState<{
+    job: ReportJob;
+    projectId: string;
+    title: string;
+  } | null>(null);
+  const [reportDeleteError, setReportDeleteError] = useState("");
   const [status, setStatus] = useState<Status | null>(null),
     [connected, setConnected] = useState(false),
     [settingsTarget, setSettingsTarget] = useState("nvd");
@@ -78,6 +93,7 @@ function App() {
     setPage("projects");
     setCreate(false);
     setDeletingProject(null);
+    setDeletingReport(null);
     setDeleteError("");
     setActivity([]);
     setUsers([]);
@@ -134,6 +150,7 @@ function App() {
           activeSelection.current = null;
           setSelected(null);
           setDeletingProject(null);
+          setDeletingReport(null);
           setNotice("This project is no longer available.");
         }
       }
@@ -238,6 +255,7 @@ function App() {
   const activeVersion = project?.versions.find(
     (version) => version.id === project.active_version_id,
   );
+  const comparisonReports = previousReports(project?.jobs || []);
   const filteredProjects = projects.filter((p) =>
     `${p.company} ${p.name} ${p.filename || ""}`
       .toLowerCase()
@@ -724,6 +742,12 @@ function App() {
                 </h2>
                 <small>Newest 30 published reports retained</small>
               </div>
+              <p className="report-comparison-note">
+                Finding changes vs. the previous published report:{" "}
+                <span className="finding-delta increase">↑ increase</span> ·{" "}
+                <span className="finding-delta decrease">↓ decrease</span>.
+                Unchanged counts have no arrow.
+              </p>
               <div className="table-wrap">
                 <table>
                   <thead>
@@ -733,6 +757,9 @@ function App() {
                       <th>STATUS</th>
                       <th>FINDINGS</th>
                       <th>REPORT</th>
+                      {user.role === "admin" && (
+                        <th className="report-delete-cell">ACTIONS</th>
+                      )}
                     </tr>
                   </thead>
                   <tbody>
@@ -759,17 +786,17 @@ function App() {
                         <td>{j.version_label}</td>
                         <td>
                           <Badge state={j.state} />
-                          {j.total && j.state === "scanning" ? (
-                            <small>
-                              {j.progress} / {j.total} components
-                            </small>
-                          ) : null}
+                          <ReportProgress job={j} />
                           {j.error && (
                             <small className="danger">{j.error}</small>
                           )}
                         </td>
                         <td>
-                          <Severity summary={j.summary} />
+                          <Severity
+                            summary={j.summary}
+                            previous={comparisonReports.get(j.id)}
+                            partial={j.state === "partial"}
+                          />
                         </td>
                         <td>
                           {["succeeded", "partial"].includes(j.state) ? (
@@ -805,6 +832,39 @@ function App() {
                             </span>
                           )}
                         </td>
+                        {user.role === "admin" && (
+                          <td className="report-delete-cell">
+                            <button
+                              className="danger-button report-delete-button"
+                              disabled={
+                                busy ||
+                                ![
+                                  "succeeded",
+                                  "partial",
+                                  "failed",
+                                  "expired",
+                                ].includes(j.state)
+                              }
+                              title={
+                                ["queued", "scanning", "exporting"].includes(
+                                  j.state,
+                                )
+                                  ? "Wait for this report to finish"
+                                  : "Permanently delete this report"
+                              }
+                              onClick={() => {
+                                setReportDeleteError("");
+                                setDeletingReport({
+                                  job: j,
+                                  projectId: project.id,
+                                  title: `${project.company} — ${project.name}`,
+                                });
+                              }}
+                            >
+                              <Trash2 size={13} /> Delete report
+                            </button>
+                          </td>
+                        )}
                       </tr>
                     ))}
                   </tbody>
@@ -940,6 +1000,11 @@ function App() {
                       </small>
                     )}
                     <small>Applied settings v{w.applied_version ?? "—"}</small>
+                    {["nvd", "cve"].includes(w.name) && (
+                      <small className="worker-history-link">
+                        View 10-day sync history & next 5 runs →
+                      </small>
+                    )}
                     {status.sources
                       ?.filter((s) => s.source === w.name)
                       .map((s) => (
@@ -1256,6 +1321,94 @@ function App() {
                     } catch (e) {
                       setDeleteError((e as Error).message);
                       throw e;
+                    }
+                  }, "")
+                }
+              >
+                {busy ? (
+                  <LoaderCircle size={16} className="spin" />
+                ) : (
+                  <Trash2 size={16} />
+                )}
+                {busy ? "Deleting…" : "Delete permanently"}
+              </button>
+            </div>
+          </div>
+        </Dialog>
+      )}
+      {deletingReport && user.role === "admin" && (
+        <Dialog
+          titleId="delete-report-title"
+          onClose={() => setDeletingReport(null)}
+          busy={busy}
+        >
+          <div className="modal delete-project-modal">
+            <div className="delete-project-icon">
+              <TriangleAlert size={26} />
+            </div>
+            <span className="eyebrow">PERMANENT DELETION</span>
+            <h2 id="delete-report-title">Delete this report?</h2>
+            <p>
+              Are you sure you want to delete the report for{" "}
+              <strong>{deletingReport.title}</strong>?
+            </p>
+            <p>
+              <strong>{when(deletingReport.job.created_at)}</strong>
+              <br />
+              SBOM version: {deletingReport.job.version_label}
+            </p>
+            <p>
+              This report’s files, scan results and findings will be permanently
+              removed. This cannot be undone.
+            </p>
+            <p className="muted">
+              The project, uploaded SBOMs, schedule and other reports will be
+              kept. Finding-count comparisons will use the remaining reports.
+            </p>
+            {reportDeleteError && (
+              <p className="delete-project-error" role="alert">
+                {reportDeleteError}
+              </p>
+            )}
+            <div className="button-row">
+              <button
+                data-dialog-autofocus
+                disabled={busy}
+                onClick={() => setDeletingReport(null)}
+              >
+                Cancel
+              </button>
+              <button
+                className="danger-button destructive"
+                disabled={busy}
+                onClick={() =>
+                  act(async () => {
+                    setReportDeleteError("");
+                    try {
+                      const result = await api<{ cleanup_pending: boolean }>(
+                        `/projects/${deletingReport.projectId}/runs/${deletingReport.job.id}`,
+                        "DELETE",
+                      );
+                      refreshRequest.current?.abort();
+                      setProject((previous) =>
+                        previous?.id === deletingReport.projectId
+                          ? {
+                              ...previous,
+                              jobs: previous.jobs.filter(
+                                (job) => job.id !== deletingReport.job.id,
+                              ),
+                            }
+                          : previous,
+                      );
+                      setDeletingReport(null);
+                      setNotice(
+                        result.cleanup_pending
+                          ? "Report deleted. File cleanup will retry automatically."
+                          : "Report deleted permanently",
+                      );
+                    } catch (error) {
+                      setReportDeleteError((error as Error).message);
+                      throw error;
                     }
                   }, "")
                 }

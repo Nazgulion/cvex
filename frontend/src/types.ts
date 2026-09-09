@@ -94,12 +94,45 @@ export interface AuditEvent {
   details: Record<string, unknown>;
 }
 export interface Schedule {
+  version?: number;
+  next_run?: string | null;
   enabled: boolean;
   mode: "interval" | "cron";
   expression: string;
   timezone: string;
   interval_seconds: number | string;
   upcoming?: string[];
+}
+export interface SyncRun {
+  id: string;
+  status: string;
+  run_type: string;
+  started_at: string;
+  finished_at: string | null;
+  processed: number | null;
+  changed: number | null;
+  duration_seconds: number | null;
+  error_type: string | null;
+  legacy: boolean;
+}
+export interface SyncHistory {
+  source: string;
+  history: SyncRun[];
+  latest: SyncRun | null;
+  totals: {
+    runs: number;
+    succeeded: number;
+    failed: number;
+    processed: number;
+    changed: number;
+  };
+  offset: number;
+  limit: number;
+  retention_days: number;
+  server_time: string;
+  source_state: Source | null;
+  worker: { state: string; phase: string | null; stale: boolean } | null;
+  schedule: (Schedule & { estimated: boolean; running: boolean }) | null;
 }
 export interface WorkerSettings {
   settings: Record<string, string>;
